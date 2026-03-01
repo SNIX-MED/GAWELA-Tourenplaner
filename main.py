@@ -107,6 +107,33 @@ def _get_runtime_dirs() -> tuple[str, str]:
     return bundle_dir, bundle_dir
 
 
+def _get_bundle_dir_candidates(bundle_dir: str) -> list[str]:
+    candidates = []
+    for value in (
+        bundle_dir,
+        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(getattr(sys, "executable", "") or ""),
+        getattr(sys, "_MEIPASS", ""),
+        os.getcwd(),
+    ):
+        path = os.path.abspath(value) if value else ""
+        if not path or path in candidates:
+            continue
+        candidates.append(path)
+        parent = os.path.dirname(path)
+        if parent and parent not in candidates:
+            candidates.append(parent)
+    return candidates
+
+
+def _resolve_runtime_asset_path(bundle_dir: str, *relative_parts: str) -> str:
+    for candidate in _get_bundle_dir_candidates(bundle_dir):
+        asset_path = os.path.join(candidate, *relative_parts)
+        if os.path.exists(asset_path):
+            return asset_path
+    return os.path.join(bundle_dir, *relative_parts)
+
+
 class Theme:
     BG = ("#F5F7FB", "#0F1115")
     PANEL = ("#FFFFFF", "#151822")
@@ -2762,9 +2789,9 @@ class ModernApp(ctk.CTk):
         self.employees_file = os.path.join(self.data_dir, "employees.json")
         self.vehicles_file = os.path.join(self.data_dir, "vehicles.json")
         self.settings_manager = SettingsManager(Path(self.config_dir))
-        self.sidebar_icons_dir = os.path.join(self.base_dir, "assets", "sidebar_icons")
-        self.app_logo_path = os.path.join(self.base_dir, "assets", "Applogo.png")
-        self.app_icon_path = os.path.join(self.base_dir, "assets", "Applogo.ico")
+        self.sidebar_icons_dir = _resolve_runtime_asset_path(self.base_dir, "assets", "sidebar_icons")
+        self.app_logo_path = _resolve_runtime_asset_path(self.base_dir, "assets", "Applogo.png")
+        self.app_icon_path = _resolve_runtime_asset_path(self.base_dir, "assets", "Applogo.ico")
         self._apply_window_icon()
         set_update_log_dir(self.logs_dir)
         self._update_runtime_context = {
