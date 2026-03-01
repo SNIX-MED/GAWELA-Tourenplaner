@@ -425,12 +425,22 @@ def _run_powershell_json(script: str, *, timeout: int = 5, raise_on_error: bool 
 
 
 def _run_powershell(script: str, *, timeout: int = 5, raise_on_error: bool = True) -> str:
+    startupinfo = None
+    creationflags = 0
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
     completed = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        startupinfo=startupinfo,
+        creationflags=creationflags,
     )
     stdout = str(completed.stdout or "").strip()
     stderr = str(completed.stderr or "").strip()
