@@ -17,6 +17,10 @@ installer-dist/*.cer
 
 logs/
 backups/
+gps-webview-profile/
+
+assets/webview2/*
+!assets/webview2/README.txt
 
 *.log
 

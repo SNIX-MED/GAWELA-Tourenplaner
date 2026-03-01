@@ -1,6 +1,7 @@
 ﻿import customtkinter as ctk
 import tkintermapview
 import webbrowser
+import ctypes
 import os
 import sys
 import time
@@ -8,6 +9,8 @@ import threading
 import copy
 import logging
 import calendar as pycalendar
+import queue
+import subprocess
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageTk, ImageDraw
 import tkinter as tk
@@ -69,6 +72,7 @@ ctk.set_default_color_theme("blue")
 
 
 logger = logging.getLogger(__name__)
+GPS_TRACKING_URL = "https://map.ktrac.ch/"
 
 
 def _patch_scrollable_frame_mousewheel_guard():
@@ -134,6 +138,301 @@ def _resolve_runtime_asset_path(bundle_dir: str, *relative_parts: str) -> str:
     return os.path.join(bundle_dir, *relative_parts)
 
 
+def _find_webview2_runtime_in_root(root_dir: str) -> str | None:
+    if not root_dir:
+        return None
+    try:
+        root_dir = os.path.abspath(root_dir)
+    except Exception:
+        return None
+    if not os.path.isdir(root_dir):
+        return None
+
+    direct_executable = os.path.join(root_dir, "msedgewebview2.exe")
+    if os.path.exists(direct_executable):
+        return root_dir
+
+    child_dirs = []
+    try:
+        child_dirs = [
+            entry.path
+            for entry in os.scandir(root_dir)
+            if entry.is_dir()
+        ]
+    except Exception:
+        return None
+
+    def _rank(path: str):
+        name = os.path.basename(path)
+        numeric_parts = []
+        for part in name.split("."):
+            numeric_parts.append(int(part) if part.isdigit() else -1)
+        return tuple(numeric_parts), name.lower()
+
+    for candidate in sorted(child_dirs, key=_rank, reverse=True):
+        executable = os.path.join(candidate, "msedgewebview2.exe")
+        if os.path.exists(executable):
+            return candidate
+    return None
+
+
+def _resolve_system_webview2_runtime_path() -> str | None:
+    standard_roots = [
+        r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application",
+        r"C:\Program Files\Microsoft\EdgeWebView\Application",
+    ]
+    for root in standard_roots:
+        runtime_dir = _find_webview2_runtime_in_root(root)
+        if runtime_dir:
+            return runtime_dir
+    return None
+
+
+def _resolve_webview2_runtime_path(bundle_dir: str) -> str | None:
+    candidate_roots = [
+        _resolve_runtime_asset_path(bundle_dir, "assets", "webview2"),
+        _resolve_runtime_asset_path(bundle_dir, "webview2"),
+        _resolve_runtime_asset_path(bundle_dir, "assets", "WebView2"),
+    ]
+    for candidate in candidate_roots:
+        runtime_dir = _find_webview2_runtime_in_root(candidate)
+        if runtime_dir:
+            return runtime_dir
+    return _resolve_system_webview2_runtime_path()
+
+
+def _apply_webview2_runtime_environment(bundle_dir: str, env: dict | None = None) -> tuple[dict, str | None]:
+    target_env = dict(os.environ if env is None else env)
+    runtime_path = _resolve_webview2_runtime_path(bundle_dir)
+    if runtime_path:
+        target_env["WEBVIEW2_BROWSER_EXECUTABLE_FOLDER"] = runtime_path
+    return target_env, runtime_path
+
+
+def _is_runtime_inside_bundle(bundle_dir: str, runtime_path: str | None) -> bool:
+    if not runtime_path:
+        return False
+    try:
+        runtime_abs = os.path.abspath(runtime_path)
+    except Exception:
+        return False
+
+    bundled_roots = [
+        _resolve_runtime_asset_path(bundle_dir, "assets", "webview2"),
+        _resolve_runtime_asset_path(bundle_dir, "webview2"),
+        _resolve_runtime_asset_path(bundle_dir, "assets", "WebView2"),
+    ]
+    for root in bundled_roots:
+        try:
+            root_abs = os.path.abspath(root)
+            if os.path.commonpath([runtime_abs, root_abs]) == root_abs:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _run_gps_webview_window(url: str):
+    import webview
+
+    bundle_dir, config_dir = _get_runtime_dirs()
+    storage_path = os.path.join(config_dir, "gps-webview-profile")
+    os.makedirs(storage_path, exist_ok=True)
+
+    _, runtime_path = _apply_webview2_runtime_environment(bundle_dir)
+    if runtime_path:
+        webview.settings["WEBVIEW2_RUNTIME_PATH"] = runtime_path
+
+    webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+    webview.create_window(
+        "GPS",
+        url=url,
+        text_select=True,
+        zoomable=True,
+        confirm_close=False,
+        width=1600,
+        height=960,
+    )
+    webview.start(
+        gui="edgechromium",
+        private_mode=False,
+        storage_path=storage_path,
+    )
+
+
+def _attach_embedded_webview_window(child_hwnd: int, parent_hwnd: int, width: int, height: int):
+    user32 = ctypes.windll.user32
+    gwl_style = -16
+    ws_child = 0x40000000
+    ws_visible = 0x10000000
+    ws_popup = 0x80000000
+    sw_show = 5
+
+    get_style = user32.GetWindowLongPtrW
+    set_style = user32.SetWindowLongPtrW
+    get_style.restype = ctypes.c_longlong
+    set_style.restype = ctypes.c_longlong
+
+    style = int(get_style(child_hwnd, gwl_style))
+    style = (style | ws_child | ws_visible) & ~ws_popup
+    set_style(child_hwnd, gwl_style, style)
+    user32.SetParent(child_hwnd, parent_hwnd)
+    user32.MoveWindow(child_hwnd, 0, 0, int(width), int(height), True)
+    user32.ShowWindow(child_hwnd, sw_show)
+
+
+def _get_parent_client_size(parent_hwnd: int) -> tuple[int, int]:
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    rect = RECT()
+    user32 = ctypes.windll.user32
+    if not user32.GetClientRect(int(parent_hwnd), ctypes.byref(rect)):
+        return 400, 320
+    width = max(int(rect.right - rect.left), 400)
+    height = max(int(rect.bottom - rect.top), 320)
+    return width, height
+
+
+def _run_gps_embedded_webview_host(parent_hwnd: int, width: int, height: int, url: str):
+    import pythoncom
+    import clr
+    from webview import _state as webview_state
+    from webview import settings as webview_settings
+    from webview.platforms.edgechromium import EdgeChrome
+    from webview.window import Window
+
+    clr.AddReference("System.Windows.Forms")
+    clr.AddReference("System.Drawing")
+
+    import System.Windows.Forms as WinForms
+    from System.Drawing import Point, Size
+
+    bundle_dir, config_dir = _get_runtime_dirs()
+    storage_path = os.path.join(config_dir, "gps-webview-profile")
+    os.makedirs(storage_path, exist_ok=True)
+
+    _, runtime_path = _apply_webview2_runtime_environment(bundle_dir)
+    if runtime_path:
+        webview_settings["WEBVIEW2_RUNTIME_PATH"] = runtime_path
+
+    pythoncom.CoInitialize()
+    try:
+        webview_state["private_mode"] = False
+        webview_state["debug"] = False
+        webview_state["user_agent"] = None
+        webview_state["ssl"] = False
+
+        form = WinForms.Form()
+        form.Text = "GPS"
+        form.FormBorderStyle = getattr(WinForms.FormBorderStyle, "None")
+        form.ShowInTaskbar = False
+        form.StartPosition = WinForms.FormStartPosition.Manual
+        form.Location = Point(0, 0)
+        form.Size = Size(max(int(width), 400), max(int(height), 320))
+
+        handle = int(form.Handle.ToInt64())
+        _attach_embedded_webview_window(handle, int(parent_hwnd), width, height)
+
+        window = Window(str(uuid4()), "GPS", url, width=form.Width, height=form.Height)
+        window.real_url = url
+        browser = EdgeChrome(form, window, storage_path)
+
+        timer = WinForms.Timer()
+        timer.Interval = 150
+        last_size = {"value": (0, 0)}
+
+        def _resize(*_args):
+            try:
+                target_width, target_height = _get_parent_client_size(int(parent_hwnd))
+                current_size = (int(target_width), int(target_height))
+                if current_size == last_size["value"]:
+                    return
+                last_size["value"] = current_size
+                _attach_embedded_webview_window(handle, int(parent_hwnd), target_width, target_height)
+            except Exception:
+                pass
+
+        timer.Tick += _resize
+        timer.Start()
+
+        def _on_closed(*_args):
+            try:
+                timer.Stop()
+            except Exception:
+                pass
+            try:
+                browser.webview.Dispose()
+            except Exception:
+                pass
+
+        form.FormClosed += _on_closed
+        form.Show()
+        _resize()
+        WinForms.Application.Run(form)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def _run_auxiliary_mode_from_argv() -> bool:
+    args = list(sys.argv[1:])
+    if not args:
+        return False
+
+    if args[0] == "--gps-embed":
+        if len(args) < 4:
+            raise SystemExit("Missing arguments for --gps-embed")
+        parent_hwnd = int(str(args[1]).strip())
+        width = int(str(args[2]).strip())
+        height = int(str(args[3]).strip())
+        url = args[4].strip() if len(args) > 4 and str(args[4]).strip() else GPS_TRACKING_URL
+        _run_gps_embedded_webview_host(parent_hwnd, width, height, url)
+        return True
+
+    if args[0] != "--gps-webview":
+        return False
+
+    url = args[1].strip() if len(args) > 1 and str(args[1]).strip() else GPS_TRACKING_URL
+    try:
+        _run_gps_webview_window(url)
+    except Exception as exc:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("GPS", f"Das native GPS-Fenster konnte nicht gestartet werden:\n{exc}")
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    return True
+
+
+def _terminate_process_gracefully(process: subprocess.Popen | None, timeout: float = 5.0) -> bool:
+    if process is None:
+        return True
+    try:
+        if process.poll() is not None:
+            return True
+    except Exception:
+        return True
+
+    try:
+        process.terminate()
+        process.wait(timeout=timeout)
+        return True
+    except Exception:
+        try:
+            process.kill()
+            process.wait(timeout=max(timeout, 1.0))
+            return True
+        except Exception:
+            return False
+
+
 class Theme:
     BG = ("#F5F7FB", "#0F1115")
     PANEL = ("#FFFFFF", "#151822")
@@ -186,6 +485,218 @@ def _scrollbar_kwargs():
         "button_hover_color": Theme.SCROLLBAR_HOVER,
         "corner_radius": 999,
     }
+
+
+class EmbeddedWebView2Frame(tk.Frame):
+    def __init__(self, master, app, *, url: str, status_callback=None):
+        super().__init__(master, bg=Theme.resolve(Theme.PANEL_2), highlightthickness=0, bd=0)
+        self.app = app
+        self.url = str(url or GPS_TRACKING_URL).strip() or GPS_TRACKING_URL
+        self.status_callback = status_callback
+        self._started = False
+        self._disposed = False
+        self._ready = False
+        self._helper_process = None
+        self._ui_queue = queue.Queue()
+        self._storage_path = os.path.join(self.app.config_dir, "gps-webview-profile")
+        os.makedirs(self._storage_path, exist_ok=True)
+
+        self.placeholder = ctk.CTkLabel(
+            self,
+            text="WebView2 wird initialisiert...",
+            font=_font(14, "bold"),
+            text_color=Theme.SUBTEXT,
+        )
+        self.placeholder.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.bind("<Map>", self._on_map, add="+")
+        self.bind("<Configure>", self._on_configure, add="+")
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        self.after(50, self._drain_ui_queue)
+        self.after(400, self._poll_helper_process)
+
+    def _set_status(self, message: str):
+        if callable(self.status_callback):
+            try:
+                self.status_callback(str(message or ""))
+            except Exception:
+                pass
+
+    def _queue_ui_call(self, callback):
+        try:
+            self._ui_queue.put_nowait(callback)
+        except Exception:
+            pass
+
+    def _drain_ui_queue(self):
+        if self._disposed:
+            return
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:
+                logger.exception("Queued GPS UI callback failed.")
+        self.after(50, self._drain_ui_queue)
+
+    def _show_placeholder(self, message: str):
+        try:
+            self.placeholder.configure(text=message)
+            self.placeholder.place(relx=0.5, rely=0.5, anchor="center")
+        except Exception:
+            pass
+
+    def _hide_placeholder(self):
+        try:
+            self.placeholder.place_forget()
+        except Exception:
+            pass
+
+    def _on_map(self, _event=None):
+        self._ensure_started()
+
+    def _on_destroy(self, event=None):
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        self.dispose()
+
+    def _on_configure(self, _event=None):
+        return
+
+    def _ensure_started(self):
+        if self._started or self._disposed:
+            return
+        if os.name != "nt":
+            self._handle_runtime_error("Die eingebettete GPS-Ansicht wird nur unter Windows unterstuetzt.")
+            return
+
+        try:
+            parent_hwnd = int(self.winfo_id())
+        except Exception:
+            self.after(120, self._ensure_started)
+            return
+        if not parent_hwnd:
+            self.after(120, self._ensure_started)
+            return
+
+        self._started = True
+        self._show_placeholder("WebView2 wird initialisiert...")
+        self._set_status("WebView2 wird gestartet...")
+        self._start_helper_process(parent_hwnd)
+
+    def _start_helper_process(self, parent_hwnd: int):
+        width = max(self.winfo_width(), 400)
+        height = max(self.winfo_height(), 320)
+        try:
+            command = self.app.get_gps_embed_helper_command(parent_hwnd, width, height, self.url)
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            env, _runtime_path = _apply_webview2_runtime_environment(self.app.base_dir)
+            self._helper_process = subprocess.Popen(
+                command,
+                cwd=self.app.base_dir,
+                env=env,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            self.after(700, self._handle_webview_ready)
+        except Exception as exc:
+            logger.exception("Embedded WebView2 helper could not be started.")
+            self._handle_runtime_error(str(exc))
+
+    def _handle_webview_ready(self):
+        if self._disposed:
+            return
+        self._ready = True
+        self._hide_placeholder()
+        runtime_path = _resolve_webview2_runtime_path(self.app.base_dir)
+        if runtime_path and _is_runtime_inside_bundle(self.app.base_dir, runtime_path):
+            self._set_status(f"Eingebettete WebView2 aktiv. Gebundene Runtime: {runtime_path}")
+        elif runtime_path:
+            self._set_status(f"Eingebettete WebView2 aktiv. Systemruntime: {runtime_path}")
+        else:
+            self._set_status("Eingebettete WebView2 aktiv.")
+
+    def _handle_webview_closed(self):
+        if self._disposed:
+            return
+        self._ready = False
+        self._show_placeholder("Die eingebettete GPS-Ansicht wurde geschlossen.")
+        self._set_status("Die eingebettete GPS-Ansicht wurde geschlossen.")
+
+    def _handle_runtime_error(self, message: str):
+        self._started = False
+        self._ready = False
+        self._show_placeholder(f"WebView2 konnte nicht gestartet werden:\n{message}")
+        self._set_status(f"WebView2-Fehler: {message}")
+
+    def _handle_navigation_starting(self, sender, args):
+        try:
+            target = str(args.Uri)
+        except Exception:
+            target = self.url
+        self._queue_ui_call(lambda: self._set_status(f"Lade: {target}"))
+
+    def _handle_navigation_completed(self, sender, args):
+        return
+
+    def _poll_helper_process(self):
+        if self._disposed:
+            return
+        process = self._helper_process
+        if process is not None:
+            try:
+                code = process.poll()
+            except Exception:
+                code = None
+            if code is not None:
+                self._helper_process = None
+                if not self._disposed:
+                    self._ready = False
+                    self._started = False
+                    self._show_placeholder("WebView2 konnte nicht gestartet werden oder wurde beendet.")
+                    self._set_status(f"WebView2-Hostprozess beendet (Code {code}).")
+        self.after(400, self._poll_helper_process)
+
+    def navigate(self, url: str):
+        target = str(url or "").strip() or self.url
+        previous_url = self.url
+        self.url = target
+        if not self._ready or self._helper_process is None or self._helper_process.poll() is not None:
+            self._ensure_started()
+            return
+        if target == previous_url:
+            return
+        self.reload()
+
+    def reload(self):
+        if self._helper_process is not None:
+            _terminate_process_gracefully(self._helper_process, timeout=2.0)
+            self._helper_process = None
+        self._ready = False
+        self._started = False
+        self._show_placeholder("WebView2 wird initialisiert...")
+        if self._disposed:
+            return
+        if not self.winfo_ismapped():
+            return
+        self._ensure_started()
+
+    def dispose(self):
+        if self._disposed:
+            return
+        self._disposed = True
+        if self._helper_process is not None:
+            _terminate_process_gracefully(self._helper_process, timeout=2.0)
+            self._helper_process = None
 
 
 def _normalize_date_string(value) -> str:
@@ -997,6 +1508,213 @@ class CalendarPage(ctk.CTkFrame):
         self.refresh_calendar()
 
 
+class GPSPage(ctk.CTkFrame):
+    def __init__(self, master, app):
+        super().__init__(master, fg_color=Theme.BG)
+        self.app = app
+        self.status_text = tk.StringVar(value="Bereit fuer native WebView2.")
+        self.runtime_hint_text = tk.StringVar(value="")
+        self.webview_host = None
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        topbar = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        topbar.grid(row=0, column=0, padx=20, pady=(20, 12), sticky="ew")
+        topbar.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            topbar,
+            text="GPS",
+            font=_font(18, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, padx=16, pady=14, sticky="w")
+
+        ctk.CTkButton(
+            topbar,
+            text="Neu laden",
+            height=36,
+            corner_radius=12,
+            font=_font(13, "bold"),
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=self._reload_embedded_view,
+        ).grid(row=0, column=1, padx=(8, 0), pady=10)
+
+        ctk.CTkButton(
+            topbar,
+            text="Im Browser öffnen",
+            height=36,
+            corner_radius=12,
+            font=_font(13, "bold"),
+            fg_color=Theme.ACCENT,
+            hover_color=Theme.ACCENT_HOVER,
+            command=self._open_in_browser,
+        ).grid(row=0, column=2, padx=(8, 14), pady=10)
+
+        shell = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        shell.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
+
+        info = ctk.CTkFrame(shell, fg_color="transparent")
+        info.grid(row=0, column=0, padx=20, pady=(20, 12), sticky="ew")
+        info.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            info,
+            text="GPS-Tracking",
+            font=_font(20, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkLabel(
+            info,
+            text=(
+                "Das GPS-Portal wird direkt in dieser Seite in einer eingebetteten nativen WebView2-Ansicht geladen. "
+                "Login, Cookies und moderne Browser-Funktionen bleiben dabei in einer echten Edge/WebView2-Laufzeit."
+            ),
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=980,
+        ).grid(row=1, column=0, pady=(8, 12), sticky="w")
+
+        url_row = ctk.CTkFrame(info, fg_color="transparent")
+        url_row.grid(row=2, column=0, sticky="ew")
+        url_row.grid_columnconfigure(0, weight=1)
+
+        self.url_entry = ctk.CTkEntry(
+            url_row,
+            height=38,
+            corner_radius=12,
+            fg_color=Theme.PANEL_2,
+            border_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+        )
+        self.url_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        self.url_entry.insert(0, GPS_TRACKING_URL)
+        self.url_entry.configure(state="readonly")
+
+        ctk.CTkButton(
+            url_row,
+            text="Kopieren",
+            width=110,
+            height=38,
+            corner_radius=12,
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=self._copy_url,
+        ).grid(row=0, column=1, sticky="e")
+
+        body = ctk.CTkFrame(
+            shell,
+            corner_radius=16,
+            fg_color=Theme.PANEL_2,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        body.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        browser_panel = ctk.CTkFrame(
+            body,
+            corner_radius=16,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        browser_panel.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+        browser_panel.grid_columnconfigure(0, weight=1)
+        browser_panel.grid_rowconfigure(0, weight=1)
+
+        embedded_host_shell = ctk.CTkFrame(
+            browser_panel,
+            corner_radius=16,
+            fg_color=Theme.PANEL_2,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        embedded_host_shell.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+        embedded_host_shell.grid_columnconfigure(0, weight=1)
+        embedded_host_shell.grid_rowconfigure(0, weight=1)
+
+        self.webview_host = EmbeddedWebView2Frame(
+            embedded_host_shell,
+            self.app,
+            url=GPS_TRACKING_URL,
+            status_callback=self._update_status,
+        )
+        self.webview_host.grid(row=0, column=0, sticky="nsew")
+
+    def _update_status(self, message: str):
+        self.status_text.set(str(message or "").strip() or "Bereit")
+
+    def _refresh_runtime_status(self):
+        runtime_path = _resolve_webview2_runtime_path(self.app.base_dir)
+        if runtime_path:
+            if _is_runtime_inside_bundle(self.app.base_dir, runtime_path):
+                self.runtime_hint_text.set(f"Gebundene Fixed-Version-Runtime: {runtime_path}")
+            else:
+                self.runtime_hint_text.set(f"Systeminstallierte WebView2-Runtime: {runtime_path}")
+        else:
+            self.runtime_hint_text.set(
+                "Keine gebundene Fixed-Version-Runtime gefunden. Fallback auf System-WebView2."
+            )
+        if self.webview_host is None:
+            self._update_status("Bereit fuer eingebettete WebView2.")
+
+    def _reload_embedded_view(self):
+        if self.webview_host is None:
+            return
+        self._update_status("GPS-Seite wird neu geladen...")
+        self.webview_host.reload()
+
+    def _open_in_browser(self):
+        try:
+            webbrowser.open(GPS_TRACKING_URL)
+        except Exception as exc:
+            messagebox.showerror("GPS", f"Die GPS-Seite konnte nicht geöffnet werden:\n{exc}")
+
+    def _copy_url(self):
+        self.clipboard_clear()
+        self.clipboard_append(GPS_TRACKING_URL)
+        messagebox.showinfo("GPS", "Die GPS-URL wurde in die Zwischenablage kopiert.")
+
+    def refresh(self):
+        try:
+            self.url_entry.configure(state="normal")
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, GPS_TRACKING_URL)
+            self.url_entry.configure(state="readonly")
+        except Exception:
+            pass
+        self._refresh_runtime_status()
+        if self.webview_host is not None:
+            self.webview_host.navigate(GPS_TRACKING_URL)
+
+    def on_show(self):
+        self.refresh()
+
+    def on_hide(self):
+        return
+
+
 class StartMenuPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=Theme.BG)
@@ -1067,16 +1785,15 @@ class StartMenuPage(ctk.CTkFrame):
         for index, (page_name, label) in enumerate(self._navigation_items()):
             row = (index // 2) + 2
             column = index % 2
-            is_primary = index == 0
             button = ctk.CTkButton(
                 launcher,
                 text=label,
                 height=58,
                 corner_radius=16,
                 font=_font(15, "bold"),
-                fg_color=Theme.ACCENT if is_primary else Theme.PANEL,
-                hover_color=Theme.ACCENT_HOVER if is_primary else Theme.BORDER,
-                text_color=("white", "white") if is_primary else Theme.TEXT,
+                fg_color=Theme.PANEL,
+                hover_color=Theme.BORDER,
+                text_color=Theme.TEXT,
                 command=lambda name=page_name: app.show_page(name),
             )
             padx = (20, 10) if column == 0 else (10, 20)
@@ -1155,6 +1872,7 @@ class StartMenuPage(ctk.CTkFrame):
         items = [
             ("calendar", "Kalender"),
             ("map", "Karte"),
+            ("gps", "GPS"),
             ("list", "Auftragsliste"),
             ("tours", "Liefertouren"),
             ("employees", "Mitarbeiter"),
@@ -2801,6 +3519,7 @@ class ModernApp(ctk.CTk):
             "is_msix": False,
         }
         self._update_runtime_context_loading = False
+        self._gps_webview_process = None
 
         self.geocode_cache_file = os.path.join(self.config_dir, "geocode_cache.json")
         self.geocoding_service = GeocodingService(
@@ -2890,7 +3609,7 @@ class ModernApp(ctk.CTk):
         self.sidebar = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.PANEL, border_width=0, width=self.sidebar_expanded_width)
         self.sidebar.grid(row=0, column=0, sticky="nsw")
         self.sidebar.grid_propagate(False)
-        self.sidebar.grid_rowconfigure(11, weight=1)
+        self.sidebar.grid_rowconfigure(12, weight=1)
 
         brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         brand.grid(row=0, column=0, padx=16, pady=(18, 10), sticky="ew")
@@ -2943,6 +3662,15 @@ class ModernApp(ctk.CTk):
         )
         self.nav_map.grid(row=3, column=0, padx=14, pady=8, sticky="ew")
 
+        self.nav_gps = NavButton(
+            self.sidebar,
+            "GPS",
+            command=lambda: self.show_page("gps"),
+            compact_icon="⌕",
+            compact_image=self.sidebar_icons.get("GPS"),
+        )
+        self.nav_gps.grid(row=4, column=0, padx=14, pady=8, sticky="ew")
+
         self.nav_list = NavButton(
             self.sidebar,
             "Auftragsliste",
@@ -2950,7 +3678,7 @@ class ModernApp(ctk.CTk):
             compact_icon="≣",
             compact_image=self.sidebar_icons.get("Auftragsliste"),
         )
-        self.nav_list.grid(row=4, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_list.grid(row=5, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_tours = NavButton(
             self.sidebar,
@@ -2959,7 +3687,7 @@ class ModernApp(ctk.CTk):
             compact_icon="↦",
             compact_image=self.sidebar_icons.get("Liefertouren"),
         )
-        self.nav_tours.grid(row=5, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_tours.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_employees = NavButton(
             self.sidebar,
@@ -2968,7 +3696,7 @@ class ModernApp(ctk.CTk):
             compact_icon="◉",
             compact_image=self.sidebar_icons.get("Mitarbeiter"),
         )
-        self.nav_employees.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_employees.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_vehicles = NavButton(
             self.sidebar,
@@ -2977,7 +3705,7 @@ class ModernApp(ctk.CTk):
             compact_icon="▣",
             compact_image=self.sidebar_icons.get("Fahrzeuge"),
         )
-        self.nav_vehicles.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_vehicles.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_settings = NavButton(
             self.sidebar,
@@ -2986,7 +3714,7 @@ class ModernApp(ctk.CTk):
             compact_icon="⚙",
             compact_image=self.sidebar_icons.get("Einstellungen"),
         )
-        self.nav_settings.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_settings.grid(row=9, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_update = None
         if SHOW_UPDATE_PAGE_IN_MENU:
@@ -2996,7 +3724,7 @@ class ModernApp(ctk.CTk):
                 command=lambda: self.show_page("update"),
                 compact_icon="↻",
             )
-            self.nav_update.grid(row=9, column=0, padx=14, pady=8, sticky="ew")
+            self.nav_update.grid(row=10, column=0, padx=14, pady=8, sticky="ew")
 
         tools = ctk.CTkFrame(
             self.sidebar,
@@ -3005,7 +3733,7 @@ class ModernApp(ctk.CTk):
             border_width=1,
             border_color=Theme.BORDER,
         )
-        tools.grid(row=10, column=0, padx=14, pady=(10, 12), sticky="ew")
+        tools.grid(row=11, column=0, padx=14, pady=(10, 12), sticky="ew")
         tools.grid_columnconfigure(0, weight=1)
         self.sidebar_tools = tools
 
@@ -3020,7 +3748,7 @@ class ModernApp(ctk.CTk):
         self.refresh_quick_access_tools()
 
         self.sidebar_footer = ctk.CTkLabel(self.sidebar, text="© GAWELA", font=_font(12), text_color=Theme.SUBTEXT)
-        self.sidebar_footer.grid(row=12, column=0, padx=14, pady=(0, 14), sticky="w")
+        self.sidebar_footer.grid(row=13, column=0, padx=14, pady=(0, 14), sticky="w")
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.grid(row=0, column=1, sticky="nsew")
@@ -3031,6 +3759,7 @@ class ModernApp(ctk.CTk):
             "menu": StartMenuPage(self.container, self),
             "calendar": CalendarPage(self.container, self),
             "map": MapPage(self.container, self),
+            "gps": GPSPage(self.container, self),
             "list": XmlListPage(self.container, self),
             "tours": ToursPage(self.container, self),
             "employees": EmployeesPage(self.container, self),
@@ -3066,6 +3795,112 @@ class ModernApp(ctk.CTk):
                 self.iconbitmap(self.app_icon_path)
             except Exception:
                 logger.exception("ICO app icon could not be applied.")
+
+    def _get_gps_helper_command(self) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--gps-webview", GPS_TRACKING_URL]
+
+        project_pythonw = os.path.join(self.base_dir, ".venv313", "Scripts", "pythonw.exe")
+        project_python = os.path.join(self.base_dir, ".venv313", "Scripts", "python.exe")
+        if os.path.exists(project_pythonw):
+            return [project_pythonw, os.path.abspath(__file__), "--gps-webview", GPS_TRACKING_URL]
+        if os.path.exists(project_python):
+            return [project_python, os.path.abspath(__file__), "--gps-webview", GPS_TRACKING_URL]
+
+        current_dir = os.path.dirname(sys.executable)
+        current_pythonw = os.path.join(current_dir, "pythonw.exe")
+        if os.path.exists(current_pythonw):
+            return [current_pythonw, os.path.abspath(__file__), "--gps-webview", GPS_TRACKING_URL]
+        return [sys.executable, os.path.abspath(__file__), "--gps-webview", GPS_TRACKING_URL]
+
+    def get_gps_embed_helper_command(self, parent_hwnd: int, width: int, height: int, url: str) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--gps-embed", str(parent_hwnd), str(width), str(height), str(url or GPS_TRACKING_URL)]
+
+        project_pythonw = os.path.join(self.base_dir, ".venv313", "Scripts", "pythonw.exe")
+        project_python = os.path.join(self.base_dir, ".venv313", "Scripts", "python.exe")
+        if os.path.exists(project_pythonw):
+            return [
+                project_pythonw,
+                os.path.abspath(__file__),
+                "--gps-embed",
+                str(parent_hwnd),
+                str(width),
+                str(height),
+                str(url or GPS_TRACKING_URL),
+            ]
+        if os.path.exists(project_python):
+            return [
+                project_python,
+                os.path.abspath(__file__),
+                "--gps-embed",
+                str(parent_hwnd),
+                str(width),
+                str(height),
+                str(url or GPS_TRACKING_URL),
+            ]
+        return [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--gps-embed",
+            str(parent_hwnd),
+            str(width),
+            str(height),
+            str(url or GPS_TRACKING_URL),
+        ]
+
+    def _is_gps_webview_running(self) -> bool:
+        process = getattr(self, "_gps_webview_process", None)
+        return bool(process and process.poll() is None)
+
+    def get_gps_runtime_status(self) -> str:
+        runtime_path = _resolve_webview2_runtime_path(self.base_dir)
+        if runtime_path:
+            if _is_runtime_inside_bundle(self.base_dir, runtime_path):
+                runtime_hint = f"Gebundene Fixed-Version-Runtime aktiv: {runtime_path}"
+            else:
+                runtime_hint = f"Systeminstallierte WebView2-Runtime aktiv: {runtime_path}"
+        else:
+            runtime_hint = "Es wurde keine WebView2-Runtime gefunden."
+        helper_command = self._get_gps_helper_command()
+        helper_runtime = helper_command[0] if helper_command else "Nicht gefunden"
+        if self._is_gps_webview_running():
+            return f"Native WebView2 aktiv. {runtime_hint} Helper: {helper_runtime}"
+        return f"Bereit fuer native WebView2. {runtime_hint} Helper: {helper_runtime}"
+
+    def terminate_gps_native_window(self, *, timeout: float = 5.0) -> bool:
+        process = getattr(self, "_gps_webview_process", None)
+        success = _terminate_process_gracefully(process, timeout=timeout)
+        if success:
+            self._gps_webview_process = None
+        return success
+
+    def launch_gps_native_window(self, *, force: bool = False) -> bool:
+        if self._is_gps_webview_running():
+            if not force:
+                return True
+            self.terminate_gps_native_window()
+
+        command = self._get_gps_helper_command()
+        startupinfo = None
+        creationflags = 0
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        env, runtime_path = _apply_webview2_runtime_environment(self.base_dir)
+        if runtime_path:
+            env["GAWELA_WEBVIEW2_RUNTIME_PATH"] = runtime_path
+
+        self._gps_webview_process = subprocess.Popen(
+            command,
+            cwd=self.base_dir,
+            env=env,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+        return True
 
     # ---------- Darkmode Toggle ----------
     def toggle_darkmode(self):
@@ -3110,6 +3945,7 @@ class ModernApp(ctk.CTk):
         self.nav_menu.set_selected(key == "menu")
         self.nav_calendar.set_selected(key == "calendar")
         self.nav_map.set_selected(key == "map")
+        self.nav_gps.set_selected(key == "gps")
         self.nav_list.set_selected(key == "list")
         self.nav_tours.set_selected(key == "tours")
         self.nav_employees.set_selected(key == "employees")
@@ -3142,6 +3978,7 @@ class ModernApp(ctk.CTk):
             self.nav_menu,
             self.nav_calendar,
             self.nav_map,
+            self.nav_gps,
             self.nav_list,
             self.nav_tours,
             self.nav_employees,
@@ -3213,6 +4050,7 @@ class ModernApp(ctk.CTk):
             ("page:menu", "Start"),
             ("page:calendar", "Kalender"),
             ("page:map", "Karte"),
+            ("page:gps", "GPS"),
             ("page:list", "Auftragsliste"),
             ("page:tours", "Liefertouren"),
             ("page:employees", "Mitarbeiter"),
@@ -3321,11 +4159,17 @@ class ModernApp(ctk.CTk):
         if not page:
             messagebox.showerror("Navigation", f"Seite '{name}' ist nicht registriert.")
             return
+        previous_page = self.pages.get(getattr(self, "current_page", ""))
+        if previous_page is not None and previous_page is not page and hasattr(previous_page, "on_hide"):
+            try:
+                previous_page.on_hide()
+            except Exception:
+                pass
         self._set_sidebar_visible(name != "menu")
         self.current_page = name
         page.tkraise()
         self._set_nav_selected(name)
-        if name in ("menu", "calendar", "list", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
+        if name in ("menu", "calendar", "gps", "list", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
             page.refresh()
         if hasattr(page, "on_show"):
             try:
@@ -5653,6 +6497,7 @@ class ModernApp(ctk.CTk):
 
     # ---------- Close ----------
     def on_close(self):
+        self.terminate_gps_native_window(timeout=2.0)
         self.save_pins()
         self.destroy()
 
@@ -5661,6 +6506,7 @@ class ModernApp(ctk.CTk):
             "Start": "Start.png",
             "Kalender": "Kalender.png",
             "Karte": "Karte & Suche.png",
+            "GPS": "GPS.png",
             "Auftragsliste": "Auftragsliste.png",
             "Liefertouren": "Liefertouren.png",
             "Mitarbeiter": "Mitarbeiter.png",
@@ -7240,5 +8086,7 @@ class ModernApp(ctk.CTk):
 
 
 if __name__ == "__main__":
+    if _run_auxiliary_mode_from_argv():
+        raise SystemExit(0)
     app = ModernApp()
     app.mainloop()

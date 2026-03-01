@@ -20,13 +20,13 @@
 -->
 <AppInstaller
     Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"
-    Version="1.0.7.0"
+    Version="1.0.8.0"
     xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
 
   <MainPackage
       Name="GAWELA.Tourenplaner"
       Publisher="CN=GAWELA"
-      Version="1.0.7.0"
+      Version="1.0.8.0"
       ProcessorArchitecture="x64"
       Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix" />
 
@@ -39,6 +39,8 @@
     <ForceUpdateFromAnyVersion>true</ForceUpdateFromAnyVersion>
   </UpdateSettings>
 </AppInstaller>
+
+
 
 
 
