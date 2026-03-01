@@ -14,8 +14,9 @@ from services.version_service import (
     get_runtime_update_context,
     is_auto_update_settings_supported,
     open_support_url,
+    repair_update_source,
     set_auto_update_check_on_launch,
-    trigger_update_installation,
+    trigger_update_installation_fresh,
 )
 
 logger = logging.getLogger(__name__)
@@ -377,9 +378,18 @@ class UpdatePage(ctk.CTkFrame):
         self.status_var.set("Update wird gestartet ...")
         context = state.get("context", {}) or {}
         prefer_appinstaller = bool(context.get("is_msix"))
+        package_family_name = str(context.get("package_family_name") or "").strip()
 
         def _worker():
-            result = trigger_update_installation(prefer_appinstaller=prefer_appinstaller)
+            repaired_detail = ""
+            if prefer_appinstaller and package_family_name:
+                repaired, repaired_detail = repair_update_source(package_family_name)
+                if not repaired and repaired_detail:
+                    logger.warning("Update source could not be repaired: %s", repaired_detail)
+            result = trigger_update_installation_fresh(prefer_appinstaller=prefer_appinstaller)
+            if repaired_detail and result.get("ok"):
+                result = dict(result)
+                result["detail"] = f"{result.get('detail', '')}\n{repaired_detail}".strip()
             self.after(0, lambda: self._finish_update_trigger(result))
 
         threading.Thread(target=_worker, daemon=True).start()

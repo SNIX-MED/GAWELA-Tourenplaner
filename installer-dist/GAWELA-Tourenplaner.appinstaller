@@ -1,7 +1,7 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
   Release / Deployment Checklist
-  1. Package-Version in MSIX und hier erhöhen, z. B. 1.0.7.0 -> 1.0.8.0
+  1. Package-Version in MSIX und hier erhöhen, z. B. 1.0.8.0 -> 1.0.9.0
   2. Neues MSIX mit derselben Package Identity und demselben Publisher signieren
   3. Neues MSIX über HTTPS hochladen
   4. Diese .appinstaller-Datei unter derselben URL aktualisieren
@@ -18,35 +18,13 @@
   - MainPackage Publisher
   - MainPackage Version
 -->
-<AppInstaller
-    Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"
-    Version="1.0.8.0"
-    xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
+<AppInstaller Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller" Version="1.0.9.0" xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
 
-  <MainPackage
-      Name="GAWELA.Tourenplaner"
-      Publisher="CN=GAWELA"
-      Version="1.0.8.0"
-      ProcessorArchitecture="x64"
-      Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix" />
+  <MainPackage Name="GAWELA.Tourenplaner" Publisher="CN=GAWELA" Version="1.0.9.0" ProcessorArchitecture="x64" Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix" />
 
   <UpdateSettings>
-    <OnLaunch
-        HoursBetweenUpdateChecks="0"
-        ShowPrompt="true"
-        UpdateBlocksActivation="false" />
+    <OnLaunch HoursBetweenUpdateChecks="0" ShowPrompt="true" UpdateBlocksActivation="false" />
     <AutomaticBackgroundTask />
     <ForceUpdateFromAnyVersion>true</ForceUpdateFromAnyVersion>
   </UpdateSettings>
 </AppInstaller>
-
-
-
-
-
-
-
-
-
-
-

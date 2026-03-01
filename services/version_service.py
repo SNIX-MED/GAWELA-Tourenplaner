@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,27 @@ def build_ms_appinstaller_uri() -> str:
     return f"ms-appinstaller:?source={quote(APPINSTALLER_URL, safe=':/?=&%')}"
 
 
+def repair_update_source(package_family_name: str) -> tuple[bool, str]:
+    package_family_name = str(package_family_name or "").strip()
+    if not package_family_name:
+        return False, "Keine PackageFamilyName verfuegbar."
+    if not APPINSTALLER_URL:
+        return False, "Keine AppInstaller-URL konfiguriert."
+    if not is_auto_update_settings_supported():
+        return False, "Die AutoUpdate-Cmdlets sind auf diesem System nicht verfuegbar."
+
+    script = (
+        f"Set-AppxPackageAutoUpdateSettings -PackageFamilyName '{_escape_ps(package_family_name)}' "
+        f"-AppInstallerUri '{_escape_ps(APPINSTALLER_URL)}' -ErrorAction Stop | Out-Null"
+    )
+    try:
+        _run_powershell(script, timeout=8)
+    except RuntimeError as exc:
+        _LOGGER.warning("Could not repair AppInstallerUri: %s", exc)
+        return False, str(exc)
+    return True, "AppInstaller-Quelle aktualisiert."
+
+
 def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str, Any]:
     if not APPINSTALLER_URL:
         return {"ok": False, "via": "none", "detail": "Keine AppInstaller-URL konfiguriert."}
@@ -216,6 +238,40 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
         }
 
     return {"ok": False, "via": "none", "detail": "Update konnte nicht gestartet werden."}
+
+
+def trigger_update_installation_fresh(*, prefer_appinstaller: bool = True) -> dict[str, Any]:
+    if not APPINSTALLER_URL:
+        return {"ok": False, "via": "none", "detail": "Keine AppInstaller-URL konfiguriert."}
+
+    connectivity = check_update_source_reachable()
+    if not connectivity.get("ok"):
+        return {"ok": False, "via": "none", "detail": "Kein Update moeglich: Keine Internetverbindung."}
+
+    protocol_enabled = _is_ms_appinstaller_protocol_enabled()
+    if prefer_appinstaller and protocol_enabled:
+        uri = build_ms_appinstaller_uri()
+        try:
+            os.startfile(uri)
+            _LOGGER.info("Triggered App Installer via protocol URI.")
+            return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geoeffnet."}
+        except Exception as exc:
+            _LOGGER.warning("ms-appinstaller protocol failed: %s", exc)
+
+    local_copy = _download_appinstaller_to_temp()
+    if local_copy:
+        try:
+            os.startfile(str(local_copy))
+            _LOGGER.info("Opened downloaded local AppInstaller file: %s", local_copy)
+            return {
+                "ok": True,
+                "via": "appinstaller-file",
+                "detail": "Die .appinstaller-Datei wurde frisch heruntergeladen und geoeffnet.",
+            }
+        except Exception as exc:
+            _LOGGER.warning("Opening downloaded AppInstaller file failed: %s", exc)
+
+    return trigger_update_installation(prefer_appinstaller=False)
 
 
 def open_support_url() -> bool:
@@ -444,7 +500,9 @@ def _download_appinstaller_to_temp() -> Path | None:
         return None
 
     try:
-        request = Request(APPINSTALLER_URL)
+        separator = "&" if "?" in APPINSTALLER_URL else "?"
+        download_url = f"{APPINSTALLER_URL}{separator}ts={int(time.time())}"
+        request = Request(download_url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         with urlopen(request, timeout=max(10.0, NETWORK_TIMEOUT_SECONDS)) as response:
             payload = response.read()
     except Exception:

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.8.0",
+    [string]$Version = "1.0.9.0",
     [string]$PackageName = "GAWELA.Tourenplaner",
     [string]$Publisher = "CN=GAWELA",
     [string]$PublisherDisplayName = "GAWELA",
@@ -24,6 +24,27 @@ function Ensure-Dir {
     param([string]$PathToCheck)
     if (-not (Test-Path -LiteralPath $PathToCheck -PathType Container)) {
         throw "Ordner nicht gefunden: $PathToCheck"
+    }
+}
+
+function Save-XmlUtf8 {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [string]$Path
+    )
+
+    $settings = New-Object System.Xml.XmlWriterSettings
+    $settings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $settings.Indent = $true
+    $settings.NewLineChars = "`r`n"
+    $settings.NewLineHandling = [System.Xml.NewLineHandling]::Replace
+
+    $writer = [System.Xml.XmlWriter]::Create($Path, $settings)
+    try {
+        $Document.Save($writer)
+    }
+    finally {
+        $writer.Dispose()
     }
 }
 
@@ -101,14 +122,26 @@ New-Item -ItemType Directory -Force -Path $assetsPath | Out-Null
 
 Copy-Item -Path (Join-Path $distPath "*") -Destination $stagePath -Recurse -Force
 
-$manifest = Get-Content $manifestTemplatePath -Raw
-$manifest = $manifest.Replace('Name="GAWELA.Tourenplaner"', "Name=""$PackageName""")
-$manifest = $manifest.Replace('Publisher="CN=GAWELA"', "Publisher=""$Publisher""")
-$manifest = $manifest.Replace('Version="1.0.0.0"', "Version=""$Version""")
-$manifest = $manifest.Replace('ProcessorArchitecture="x64"', "ProcessorArchitecture=""$Architecture""")
-$manifest = $manifest.Replace('GAWELA Tourenplaner', $AppDisplayName)
-$manifest = $manifest.Replace('PublisherDisplayName>GAWELA<', "PublisherDisplayName>$PublisherDisplayName<")
-Set-Content -Path (Join-Path $stagePath "AppxManifest.xml") -Value $manifest -Encoding UTF8
+$manifestPath = Join-Path $stagePath "AppxManifest.xml"
+$manifest = New-Object System.Xml.XmlDocument
+$manifest.PreserveWhitespace = $true
+$manifest.Load($manifestTemplatePath)
+
+$identityNode = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Identity']")
+$propertiesNode = $manifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Properties']")
+
+if (-not $identityNode -or -not $propertiesNode) {
+    throw "Manifest-Vorlage ist ungueltig: Identity oder Properties fehlt."
+}
+
+$identityNode.SetAttribute("Name", $PackageName)
+$identityNode.SetAttribute("Publisher", $Publisher)
+$identityNode.SetAttribute("Version", $Version)
+$identityNode.SetAttribute("ProcessorArchitecture", $Architecture)
+$propertiesNode.SelectSingleNode("./*[local-name()='DisplayName']").InnerText = $AppDisplayName
+$propertiesNode.SelectSingleNode("./*[local-name()='PublisherDisplayName']").InnerText = $PublisherDisplayName
+
+Save-XmlUtf8 -Document $manifest -Path $manifestPath
 
 Resize-Image -InputPath $iconSourcePath -OutputPath (Join-Path $assetsPath "Square44x44Logo.png") -Width 44 -Height 44
 Resize-Image -InputPath $iconSourcePath -OutputPath (Join-Path $assetsPath "Square71x71Logo.png") -Width 71 -Height 71
@@ -152,12 +185,24 @@ Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Trus
 
 & $signTool sign /fd SHA256 /f $pfxPath /p $CertificatePassword $msixPath | Out-Null
 
-$appinstaller = Get-Content $appinstallerTemplatePath -Raw
-$appinstaller = $appinstaller.Replace('Version="1.0.0.0"', "Version=""$Version""")
-$appinstaller = $appinstaller.Replace('Name="YOUR.COMPANY.GAWELA.Tourenplaner"', "Name=""$PackageName""")
-$appinstaller = $appinstaller.Replace('Publisher="CN=YOUR-COMPANY"', "Publisher=""$Publisher""")
-$appinstaller = $appinstaller.Replace('ProcessorArchitecture="x64"', "ProcessorArchitecture=""$Architecture""")
-Set-Content -Path $appinstallerPath -Value $appinstaller -Encoding UTF8
+$appinstaller = New-Object System.Xml.XmlDocument
+$appinstaller.PreserveWhitespace = $true
+$appinstaller.Load($appinstallerTemplatePath)
+
+$appInstallerNode = $appinstaller.SelectSingleNode("/*[local-name()='AppInstaller']")
+$mainPackageNode = $appinstaller.SelectSingleNode("/*[local-name()='AppInstaller']/*[local-name()='MainPackage']")
+
+if (-not $appInstallerNode -or -not $mainPackageNode) {
+    throw "AppInstaller-Vorlage ist ungueltig: AppInstaller oder MainPackage fehlt."
+}
+
+$appInstallerNode.SetAttribute("Version", $Version)
+$mainPackageNode.SetAttribute("Name", $PackageName)
+$mainPackageNode.SetAttribute("Publisher", $Publisher)
+$mainPackageNode.SetAttribute("Version", $Version)
+$mainPackageNode.SetAttribute("ProcessorArchitecture", $Architecture)
+
+Save-XmlUtf8 -Document $appinstaller -Path $appinstallerPath
 
 if ($OneDriveOutputDir) {
     New-Item -ItemType Directory -Force -Path $OneDriveOutputDir | Out-Null

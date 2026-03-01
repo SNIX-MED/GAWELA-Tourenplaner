@@ -26,6 +26,27 @@ function Ensure-FileExists {
     }
 }
 
+function Save-XmlUtf8 {
+    param(
+        [System.Xml.XmlDocument]$Document,
+        [string]$Path
+    )
+
+    $settings = New-Object System.Xml.XmlWriterSettings
+    $settings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $settings.Indent = $true
+    $settings.NewLineChars = "`r`n"
+    $settings.NewLineHandling = [System.Xml.NewLineHandling]::Replace
+
+    $writer = [System.Xml.XmlWriter]::Create($Path, $settings)
+    try {
+        $Document.Save($writer)
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
 Ensure-FileExists -PathToCheck $MsixPath
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -45,24 +66,29 @@ $releaseBaseUrl = "https://github.com/$RepoOwner/$RepoName/releases/latest/downl
 $appinstallerUrl = "$releaseBaseUrl/$appinstallerAssetName"
 $msixUrl = "$releaseBaseUrl/$msixAssetName"
 
-$template = Get-Content $templatePath -Raw
-$template = $template.Replace('Version="1.0.0.0"', "Version=""$Version""")
-$template = $template.Replace('Name="YOUR.COMPANY.GAWELA.Tourenplaner"', "Name=""$PackageName""")
-$template = $template.Replace('Publisher="CN=YOUR-COMPANY"', "Publisher=""$Publisher""")
-$template = $template.Replace('ProcessorArchitecture="x64"', "ProcessorArchitecture=""$Architecture""")
-$template = $template.Replace(
-    'Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"',
-    "Uri=""$appinstallerUrl"""
-)
-$template = $template.Replace(
-    'Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix"',
-    "Uri=""$msixUrl"""
-)
+$template = New-Object System.Xml.XmlDocument
+$template.PreserveWhitespace = $true
+$template.Load($templatePath)
+
+$appInstallerNode = $template.SelectSingleNode("/*[local-name()='AppInstaller']")
+$mainPackageNode = $template.SelectSingleNode("/*[local-name()='AppInstaller']/*[local-name()='MainPackage']")
+
+if (-not $appInstallerNode -or -not $mainPackageNode) {
+    throw "AppInstaller-Vorlage ist ungueltig: AppInstaller oder MainPackage fehlt."
+}
+
+$appInstallerNode.SetAttribute("Uri", $appinstallerUrl)
+$appInstallerNode.SetAttribute("Version", $Version)
+$mainPackageNode.SetAttribute("Name", $PackageName)
+$mainPackageNode.SetAttribute("Publisher", $Publisher)
+$mainPackageNode.SetAttribute("Version", $Version)
+$mainPackageNode.SetAttribute("ProcessorArchitecture", $Architecture)
+$mainPackageNode.SetAttribute("Uri", $msixUrl)
 
 $appinstallerOut = Join-Path $resolvedOutputDir $appinstallerAssetName
 $msixOut = Join-Path $resolvedOutputDir $msixAssetName
 
-Set-Content -Path $appinstallerOut -Value $template -Encoding UTF8
+Save-XmlUtf8 -Document $template -Path $appinstallerOut
 Copy-Item -LiteralPath $MsixPath -Destination $msixOut -Force
 
 Write-Host ""

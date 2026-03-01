@@ -10,7 +10,7 @@
   <Identity
       Name="GAWELA.Tourenplaner"
       Publisher="CN=GAWELA"
-      Version="1.0.8.0"
+      Version="1.0.9.0"
       ProcessorArchitecture="x64" />
 
   <Properties>
