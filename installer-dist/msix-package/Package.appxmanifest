@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+    xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap uap10 desktop6 rescap">
+
+  <Identity
+      Name="GAWELA.Tourenplaner"
+      Publisher="CN=GAWELA"
+      Version="1.0.0.0"
+      ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>GAWELA Tourenplaner</DisplayName>
+    <PublisherDisplayName>GAWELA</PublisherDisplayName>
+    <Description>GAWELA Tourenplaner als MSIX-Paket.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="de-de" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily
+        Name="Windows.Desktop"
+        MinVersion="10.0.17763.0"
+        MaxVersionTested="10.0.19045.0" />
+  </Dependencies>
+
+  <Applications>
+    <Application
+        Id="App"
+        Executable="GAWELA-Tourenplaner.exe"
+        EntryPoint="Windows.FullTrustApplication"
+        uap10:RuntimeBehavior="packagedClassicApp"
+        uap10:TrustLevel="mediumIL">
+      <uap:VisualElements
+          DisplayName="GAWELA Tourenplaner"
+          Description="GAWELA Tourenplaner"
+          BackgroundColor="transparent"
+          Square44x44Logo="Assets\Square44x44Logo.png"
+          Square150x150Logo="Assets\Square150x150Logo.png">
+        <uap:DefaultTile
+            Wide310x150Logo="Assets\Wide310x150Logo.png"
+            Square71x71Logo="Assets\Square71x71Logo.png"
+            Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#FFFFFF" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

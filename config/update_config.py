@@ -13,7 +13,7 @@ SUPPORT_URL = "https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases"
 REQUIRE_MSIX_FOR_AUTOUPDATE = True
 SHOW_UPDATE_PAGE_IN_MENU = True
 
-# Optional package hints for PowerShell lookups. Leave empty if APP_NAME is sufficient.
-PACKAGE_NAME_HINTS: tuple[str, ...] = ()
+# Optional package hints for PowerShell lookups. Keep them aligned with the MSIX identity.
+PACKAGE_NAME_HINTS: tuple[str, ...] = ("GAWELA.Tourenplaner",)
 VERSION_FILE_NAME = "version.txt"
 NETWORK_TIMEOUT_SECONDS = 3.0

@@ -9,6 +9,11 @@ __pycache__/
 build/
 dist/
 installer-dist/release-assets/
+installer-dist/msix-stage/
+installer-dist/priconfig.xml
+installer-dist/*.msix
+installer-dist/*.pfx
+installer-dist/*.cer
 
 logs/
 backups/
