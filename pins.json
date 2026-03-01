@@ -1,0 +1,102 @@
+[
+  {
+    "lat": 47.6584671,
+    "lng": 9.1460347,
+    "status": "nicht festgelegt",
+    "data": {
+      "Auftragsnummer": "225658",
+      "Bestelldatum": "20.02.2026",
+      "Name": "Mike Saint",
+      "Strasse": "ARA-Strasse 1",
+      "PLZ": "8274",
+      "Ort": "Tägerwilen",
+      "Email": "Test@beispiel.ch",
+      "Telefon": "044 555 44 33",
+      "Gewicht": "150kg",
+      "Notizen": "",
+      "lat": 47.6584671,
+      "lng": 9.1460347,
+      "Status": "nicht festgelegt"
+    }
+  },
+  {
+    "lat": 47.3136006,
+    "lng": 8.5362408,
+    "status": "nicht festgelegt",
+    "data": {
+      "Auftragsnummer": "215487",
+      "Bestelldatum": "05.02.2026",
+      "Name": "Dave Saint",
+      "Strasse": "Birkenstrasse 6",
+      "PLZ": "8134",
+      "Ort": "Adliswil",
+      "Email": "Test@Testmail.ch",
+      "Telefon": "044 111 63 33",
+      "Gewicht": "150kg",
+      "Notizen": "",
+      "lat": 47.3136006,
+      "lng": 8.5362408,
+      "Status": "nicht festgelegt"
+    }
+  },
+  {
+    "lat": 47.3906847,
+    "lng": 8.8533099,
+    "status": "Auf dem Weg",
+    "data": {
+      "Auftragsnummer": "213587",
+      "Bestelldatum": "26.02.2026",
+      "Name": "Herr Test",
+      "Strasse": "Hittnauerstrasse 1",
+      "PLZ": "8493",
+      "Ort": "Saland",
+      "Email": "Test@Testmail.ch",
+      "Telefon": "044 111 63 33",
+      "Gewicht": "150kg",
+      "Notizen": "",
+      "lat": 47.3906847,
+      "lng": 8.8533099,
+      "Status": "Auf dem Weg"
+    }
+  },
+  {
+    "lat": 47.3672965,
+    "lng": 8.5398712,
+    "status": "Bestellt",
+    "data": {
+      "Auftragsnummer": "N/A",
+      "Bestelldatum": "N/A",
+      "Name": "Max Muster",
+      "Strasse": "Bahnhofstrasse 1",
+      "PLZ": "8001",
+      "Ort": "Zürich",
+      "Email": "max@beispiel.ch",
+      "Telefon": "044 123 45 67",
+      "Gewicht": "N/A",
+      "Notizen": "",
+      "lat": 47.3672965,
+      "lng": 8.5398712,
+      "Status": "Bestellt"
+    }
+  },
+  {
+    "lat": 47.3030369,
+    "lng": 9.087262,
+    "status": "Im Lager",
+    "data": {
+      "Auftragsnummer": "256848",
+      "Bestelldatum": "10.01.2026",
+      "Name": "Fritz Maier",
+      "Strasse": "Poststrasse 20",
+      "PLZ": "9630",
+      "Ort": "Wattwil",
+      "Email": "Muster@Testmail.ch",
+      "Telefon": "041 121 33 63",
+      "Gewicht": "150kg",
+      "Notizen": "",
+      "lat": 47.3030369,
+      "lng": 9.087262,
+      "Status": "Im Lager"
+    }
+  }
+]

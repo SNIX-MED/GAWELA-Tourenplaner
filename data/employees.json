@@ -1,0 +1,18 @@
+[
+  {
+    "id": "61e59930-6b52-48cf-9cbf-269da2e5bd5c",
+    "name": "Janine Fäsi",
+    "short": "J.F.",
+    "phone": "0716670000",
+    "active": true,
+    "created_at": "2026-02-28T13:49:20"
+  },
+  {
+    "id": "b7aaec2d-a42d-4792-b2ef-ed3c4ddf3576",
+    "name": "Mike Saint",
+    "short": "M.S.",
+    "phone": "0764416114",
+    "active": true,
+    "created_at": "2026-02-28T12:36:09"
+  }
+]

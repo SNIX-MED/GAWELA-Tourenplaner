@@ -1,0 +1,36 @@
+{
+  "vehicles": [
+    {
+      "id": "c5f2c3d8-5182-47c1-b458-8e457bca1e0b",
+      "type": "other",
+      "name": "Ford 1",
+      "license_plate": "TG11231",
+      "max_payload_kg": 1500,
+      "max_trailer_load_kg": 3000,
+      "active": true,
+      "notes": "",
+      "volume_m3": 15,
+      "loading_area": {
+        "length_cm": 123,
+        "width_cm": 123,
+        "height_cm": 123
+      },
+      "created_at": "2026-02-28T17:13:39",
+      "updated_at": "2026-02-28T23:45:07"
+    }
+  ],
+  "trailers": [
+    {
+      "id": "2e88b8df-af4f-4432-8a51-6d918439c7bd",
+      "name": "Anhänger 1",
+      "license_plate": "TG1234",
+      "max_payload_kg": 1250,
+      "active": true,
+      "notes": "",
+      "volume_m3": 0,
+      "loading_area": null,
+      "created_at": "2026-02-28T17:14:10",
+      "updated_at": "2026-02-28T17:14:10"
+    }
+  ]
+}

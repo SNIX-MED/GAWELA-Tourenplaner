@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.idea/
+
+build/
+dist/
+
+logs/
+backups/
+
+*.log
+
+# Local runtime data
+geocode_cache.json
+xml_import_state.json
+
+# Windows
+Thumbs.db
+Desktop.ini

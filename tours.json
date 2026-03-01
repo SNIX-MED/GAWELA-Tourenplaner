@@ -1,0 +1,78 @@
+[
+  {
+    "id": 1,
+    "date": "28-02-2026",
+    "name": "Tour 1",
+    "stops": [
+      {
+        "id": "auftrag:215487",
+        "name": "Dave Saint",
+        "address": "Birkenstrasse 6, 8134 Adliswil",
+        "lat": 47.3136006,
+        "lon": 8.5362408,
+        "lng": 8.5362408,
+        "order": 1,
+        "auftragsnummer": "215487",
+        "weight": "150kg",
+        "time_window_start": "",
+        "time_window_end": "",
+        "service_minutes": 0,
+        "planned_arrival": "09:02",
+        "planned_departure": "09:02",
+        "schedule_conflict": false,
+        "schedule_conflict_text": "",
+        "wait_minutes": 0
+      }
+    ],
+    "employee_ids": [
+      "b7aaec2d-a42d-4792-b2ef-ed3c4ddf3576"
+    ],
+    "vehicle_id": "c5f2c3d8-5182-47c1-b458-8e457bca1e0b",
+    "trailer_id": "None",
+    "start_time": "08:00",
+    "route_mode": "car",
+    "travel_time_cache": {
+      "depot_start->auftrag:215487": 62,
+      "auftrag:215487->depot_end": 62
+    }
+  },
+  {
+    "id": 2,
+    "date": "01-03-2026",
+    "name": "Tour 1",
+    "stops": [
+      {
+        "id": "auftrag:213587",
+        "name": "Herr Test",
+        "address": "Hittnauerstrasse 1, 8493 Saland",
+        "lat": 47.3906847,
+        "lon": 8.8533099,
+        "lng": 8.8533099,
+        "order": 1,
+        "auftragsnummer": "213587",
+        "weight": "150kg",
+        "time_window_start": "",
+        "time_window_end": "",
+        "service_minutes": 0,
+        "planned_arrival": "08:50",
+        "planned_departure": "08:50",
+        "schedule_conflict": false,
+        "schedule_conflict_text": "",
+        "wait_minutes": 0
+      }
+    ],
+    "employee_ids": [
+      "61e59930-6b52-48cf-9cbf-269da2e5bd5c",
+      "b7aaec2d-a42d-4792-b2ef-ed3c4ddf3576"
+    ],
+    "vehicle_id": "c5f2c3d8-5182-47c1-b458-8e457bca1e0b",
+    "trailer_id": null,
+    "start_time": "07:00",
+    "route_mode": "car",
+    "travel_time_cache": {
+      "depot_start->auftrag:213587": 50,
+      "auftrag:213587->depot_end": 50,
+      "depot_start->depot_end": 1
+    }
+  }
+]

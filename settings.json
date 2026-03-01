@@ -1,0 +1,17 @@
+{
+  "xml_folder": "C:/Users/Mike/Desktop/Aufträge XML",
+  "appearance_mode": "Light",
+  "quick_access_items": [
+    "action:export_route",
+    "action:import_folder",
+    "",
+    ""
+  ],
+  "backups_enabled": true,
+  "backup_dir": "C:\\Users\\Mike\\PycharmProjects\\PythonProject\\backups",
+  "backup_mode_default": "full",
+  "backup_retention_days": 30,
+  "auto_backup_enabled": true,
+  "auto_backup_interval_days": 7,
+  "last_backup_iso": "2026-02-28T18:38:22.157142+00:00"
+}
