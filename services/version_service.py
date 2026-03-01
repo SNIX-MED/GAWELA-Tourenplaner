@@ -228,7 +228,7 @@ def get_auto_update_settings(package_family_name: str, *, show_update_availabili
         f"{availability_flag} -ErrorAction Stop; "
         "if ($settings) { $settings | ConvertTo-Json -Depth 5 -Compress }"
     )
-    payload = _run_powershell_json(script, timeout=6)
+    payload = _run_powershell_json(script, timeout=12, raise_on_error=False)
     return payload if isinstance(payload, dict) else None
 
 
@@ -316,7 +316,7 @@ def _find_package_by_install_location(runtime_path: Path) -> dict[str, Any] | No
         "} | Select-Object -First 1 Name, PackageFamilyName, Version, InstallLocation, PackageFullName; "
         "if ($pkg) { $pkg | ConvertTo-Json -Depth 4 -Compress }"
     )
-    payload = _run_powershell_json(script, timeout=5, raise_on_error=False)
+    payload = _run_powershell_json(script, timeout=12, raise_on_error=False)
     return payload if isinstance(payload, dict) else None
 
 
@@ -336,7 +336,7 @@ def _find_package_by_hints() -> dict[str, Any] | None:
         "} | Select-Object -First 1 Name, PackageFamilyName, Version, InstallLocation, PackageFullName; "
         "if ($pkg) { $pkg | ConvertTo-Json -Depth 4 -Compress }"
     )
-    payload = _run_powershell_json(script, timeout=5, raise_on_error=False)
+    payload = _run_powershell_json(script, timeout=12, raise_on_error=False)
     return payload if isinstance(payload, dict) else None
 
 
@@ -433,15 +433,28 @@ def _run_powershell(script: str, *, timeout: int = 5, raise_on_error: bool = Tru
         startupinfo.wShowWindow = 0
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        message = f"PowerShell-Aufruf hat das Zeitlimit von {timeout}s ueberschritten."
+        if raise_on_error:
+            raise RuntimeError(message)
+        _LOGGER.warning(message)
+        return ""
+    except OSError as exc:
+        message = f"PowerShell konnte nicht gestartet werden: {exc}"
+        if raise_on_error:
+            raise RuntimeError(message)
+        _LOGGER.warning(message)
+        return ""
     stdout = str(completed.stdout or "").strip()
     stderr = str(completed.stderr or "").strip()
     if completed.returncode != 0 and raise_on_error:

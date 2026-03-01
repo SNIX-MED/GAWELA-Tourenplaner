@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from tkinter import messagebox
 
@@ -16,6 +17,8 @@ from services.version_service import (
     set_auto_update_check_on_launch,
     trigger_update_installation,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class UpdatePage(ctk.CTkFrame):
@@ -266,20 +269,24 @@ class UpdatePage(ctk.CTkFrame):
         self.internet_var.set("Pruefung laeuft ...")
 
         def _worker():
-            context = get_runtime_update_context()
-            internet = check_update_source_reachable()
-            auto_supported = is_auto_update_settings_supported()
-            auto_settings = None
-            if context.get("is_msix") and auto_supported and context.get("package_family_name"):
-                auto_settings = get_auto_update_settings(context["package_family_name"], show_update_availability=True)
+            try:
+                context = get_runtime_update_context()
+                internet = check_update_source_reachable()
+                auto_supported = is_auto_update_settings_supported()
+                auto_settings = None
+                if context.get("is_msix") and auto_supported and context.get("package_family_name"):
+                    auto_settings = get_auto_update_settings(context["package_family_name"], show_update_availability=True)
 
-            payload = {
-                "context": context,
-                "internet": internet,
-                "auto_supported": auto_supported,
-                "auto_settings": auto_settings,
-            }
-            self.after(0, lambda: self._apply_refresh_result(payload))
+                payload = {
+                    "context": context,
+                    "internet": internet,
+                    "auto_supported": auto_supported,
+                    "auto_settings": auto_settings,
+                }
+                self.after(0, lambda: self._apply_refresh_result(payload))
+            except Exception as exc:
+                logger.exception("Update status refresh failed.")
+                self.after(0, lambda: self._apply_refresh_error(str(exc) or "Unbekannter Fehler beim Laden des Update-Status."))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -337,6 +344,18 @@ class UpdatePage(ctk.CTkFrame):
             self.auto_update_info_var.set(
                 "Diese Installation ist nicht als MSIX erkannt. Fuer automatische Updates bitte ueber die .appinstaller-Datei installieren."
             )
+
+    def _apply_refresh_error(self, detail: str):
+        self._refresh_running = False
+        self._state = {}
+        self.internet_var.set("Fehler")
+        self.installation_var.set("Fehler beim Laden")
+        self.version_var.set("Fehler beim Laden")
+        self.status_var.set(f"Update-Status konnte nicht geladen werden.\n{detail}")
+        self.show_settings_button.configure(state="disabled")
+        self.check_on_launch_var.set(False)
+        self.auto_update_switch.configure(state="disabled")
+        self.auto_update_info_var.set("Die Update-Informationen konnten nicht geladen werden.")
 
     def _copy_appinstaller_url(self):
         value = self.url_var.get().strip()
