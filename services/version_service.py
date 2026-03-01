@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -160,7 +161,9 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
     if not connectivity.get("ok"):
         return {"ok": False, "via": "none", "detail": "Kein Update moeglich: Keine Internetverbindung."}
 
-    if prefer_appinstaller:
+    protocol_enabled = _is_ms_appinstaller_protocol_enabled()
+
+    if prefer_appinstaller and protocol_enabled:
         uri = build_ms_appinstaller_uri()
         try:
             os.startfile(uri)
@@ -168,21 +171,36 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
             return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geoeffnet."}
         except Exception as exc:
             _LOGGER.warning("ms-appinstaller protocol failed: %s", exc)
+    elif prefer_appinstaller:
+        _LOGGER.info("ms-appinstaller protocol skipped because it is disabled on this system.")
 
     try:
         os.startfile(APPINSTALLER_URL)
         _LOGGER.info("Opened AppInstaller URL directly after protocol fallback.")
         return {
             "ok": True,
-            "via": "browser",
+            "via": "appinstaller-url",
             "detail": (
-                "Die .appinstaller-URL wurde geoeffnet."
+                "Die .appinstaller-Datei wurde geoeffnet."
                 if not prefer_appinstaller
-                else "Das ms-appinstaller-Protokoll war nicht verfuegbar. Die .appinstaller-URL wurde geoeffnet."
+                else "Das ms-appinstaller-Protokoll ist deaktiviert oder nicht verfuegbar. Die .appinstaller-Datei wurde direkt geoeffnet."
             ),
         }
     except Exception as exc:
         _LOGGER.warning("Direct open of AppInstaller URL failed: %s", exc)
+
+    local_copy = _download_appinstaller_to_temp()
+    if local_copy:
+        try:
+            os.startfile(str(local_copy))
+            _LOGGER.info("Opened downloaded local AppInstaller file: %s", local_copy)
+            return {
+                "ok": True,
+                "via": "appinstaller-file",
+                "detail": "Die .appinstaller-Datei wurde lokal heruntergeladen und geoeffnet.",
+            }
+        except Exception as exc:
+            _LOGGER.warning("Opening downloaded AppInstaller file failed: %s", exc)
 
     opened = webbrowser.open(APPINSTALLER_URL)
     if opened:
@@ -401,6 +419,47 @@ def _read_metadata_version() -> str | None:
         except Exception:
             _LOGGER.warning("Metadata version lookup failed for %s", package_name, exc_info=True)
     return None
+
+
+def _is_ms_appinstaller_protocol_enabled() -> bool:
+    if os.name != "nt":
+        return False
+
+    try:
+        import winreg
+    except ImportError:
+        return False
+
+    key_path = r"SOFTWARE\Policies\Microsoft\Windows\AppInstaller"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+            value, _ = winreg.QueryValueEx(key, "EnableMSAppInstallerProtocol")
+            return bool(int(value))
+    except OSError:
+        return False
+
+
+def _download_appinstaller_to_temp() -> Path | None:
+    if not APPINSTALLER_URL:
+        return None
+
+    try:
+        request = Request(APPINSTALLER_URL)
+        with urlopen(request, timeout=max(10.0, NETWORK_TIMEOUT_SECONDS)) as response:
+            payload = response.read()
+    except Exception:
+        _LOGGER.warning("Downloading AppInstaller file failed.", exc_info=True)
+        return None
+
+    try:
+        target_dir = Path(tempfile.gettempdir()) / "gawela-appinstaller"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / "GAWELA-Tourenplaner.appinstaller"
+        target_path.write_bytes(payload)
+        return target_path
+    except OSError:
+        _LOGGER.warning("Writing downloaded AppInstaller file failed.", exc_info=True)
+        return None
 
 
 def _powershell_command_exists(command_name: str) -> bool:

@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
   Release / Deployment Checklist
-  1. Package-Version in MSIX und hier erhoehen, z. B. 1.0.3.0 -> 1.0.4.0
+  1. Package-Version in MSIX und hier erhoehen, z. B. 1.0.4.0 -> 1.0.5.0
   2. Neues MSIX mit derselben Package Identity und demselben Publisher signieren
   3. Neues MSIX ueber HTTPS hochladen
   4. Diese .appinstaller-Datei unter derselben URL aktualisieren
@@ -20,13 +20,13 @@
 -->
 <AppInstaller
     Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"
-    Version="1.0.3.0"
+    Version="1.0.4.0"
     xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
 
   <MainPackage
       Name="GAWELA.Tourenplaner"
       Publisher="CN=GAWELA"
-      Version="1.0.3.0"
+      Version="1.0.4.0"
       ProcessorArchitecture="x64"
       Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix" />
 
@@ -39,6 +39,7 @@
     <ForceUpdateFromAnyVersion>true</ForceUpdateFromAnyVersion>
   </UpdateSettings>
 </AppInstaller>
+
 
 
 

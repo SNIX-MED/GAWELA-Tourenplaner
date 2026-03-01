@@ -4,16 +4,17 @@ Desktop-Anwendung zur Tourenplanung mit MSIX/AppInstaller-Distribution ueber Git
 
 ## Aktueller Release
 
-- Version: `1.0.2`
-- Release: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/tag/v1.0.2`
+- Version: `1.0.4`
+- Release: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/tag/v1.0.4`
 - AppInstaller-Download: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller`
 - MSIX-Download: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix`
 
-## Enthalten in v1.0.2
+## Enthalten in v1.0.4
 
 - Update-Menue im Programm
 - Neues App-Icon
 - Fix fuer die kurz sichtbare CMD/PowerShell-Konsole beim Start
+- Fallback fuer deaktiviertes `ms-appinstaller`: Die App oeffnet dann direkt die `.appinstaller`-Datei bzw. eine lokal heruntergeladene Kopie
 
 ## Installation auf Windows
 
@@ -27,7 +28,7 @@ Desktop-Anwendung zur Tourenplanung mit MSIX/AppInstaller-Distribution ueber Git
 ## Auto-Updates
 
 - Fuer automatische Updates muss die App ueber die `.appinstaller`-Datei installiert werden.
-- Die Update-Quelle zeigt auf `releases/latest/download/...` und liefert aktuell `1.0.2.0`.
+- Die Update-Quelle zeigt auf `releases/latest/download/...` und liefert aktuell `1.0.4.0`.
 - Die veroeffentlichte `.appinstaller`-Datei enthaelt `OnLaunch` und `AutomaticBackgroundTask`.
 - Im Programm steht dafuer das Update-Menue zur Verfuegung.
 
