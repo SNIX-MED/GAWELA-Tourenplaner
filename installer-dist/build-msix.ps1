@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.0.0",
+    [string]$Version = "1.0.1.0",
     [string]$PackageName = "GAWELA.Tourenplaner",
     [string]$Publisher = "CN=GAWELA",
     [string]$PublisherDisplayName = "GAWELA",
@@ -80,7 +80,7 @@ $pfxPath = Join-Path $outputPath "GAWELA-Tourenplaner.pfx"
 $appinstallerPath = Join-Path $outputPath "GAWELA-Tourenplaner.appinstaller"
 $manifestTemplatePath = Join-Path $PSScriptRoot "msix-package\Package.appxmanifest"
 $appinstallerTemplatePath = Join-Path $PSScriptRoot "GAWELA-Tourenplaner.appinstaller"
-$iconSourcePath = Join-Path $repoRoot "assets\sidebar_icons\Start.png"
+$iconSourcePath = Join-Path $repoRoot "assets\Applogo.png"
 $makeAppx = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\makeappx.exe"
 $makePri = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\makepri.exe"
 $signTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe"

@@ -2633,6 +2633,7 @@ class ModernApp(ctk.CTk):
         self.depot_end_marker = None
 
         self.base_dir, self.config_dir = _get_runtime_dirs()
+        self._window_icon_image = None
         self.data_dir = os.path.join(self.config_dir, "data")
         self.logs_dir = os.path.join(self.config_dir, "logs")
         os.makedirs(self.config_dir, exist_ok=True)
@@ -2646,6 +2647,9 @@ class ModernApp(ctk.CTk):
         self.vehicles_file = os.path.join(self.data_dir, "vehicles.json")
         self.settings_manager = SettingsManager(Path(self.config_dir))
         self.sidebar_icons_dir = os.path.join(self.base_dir, "assets", "sidebar_icons")
+        self.app_logo_path = os.path.join(self.base_dir, "assets", "Applogo.png")
+        self.app_icon_path = os.path.join(self.base_dir, "assets", "Applogo.ico")
+        self._apply_window_icon()
         set_update_log_dir(self.logs_dir)
         self._update_runtime_context = {
             "installation_type": "unknown",
@@ -2698,6 +2702,7 @@ class ModernApp(ctk.CTk):
         self.current_route_travel_time_cache = {}
         self.current_route_distance_cache = {}
         self._route_metrics_job = 0
+
         self.current_route_employee_ids = []
         self.current_route_vehicle_id = None
         self.current_route_trailer_id = None
@@ -2894,6 +2899,19 @@ class ModernApp(ctk.CTk):
         self.refresh_update_runtime_context()
         self.start_zoom_watch()
         self.after(2500, self._check_auto_backup_due)
+
+    def _apply_window_icon(self):
+        if os.path.exists(self.app_logo_path):
+            try:
+                self._window_icon_image = tk.PhotoImage(file=self.app_logo_path)
+                self.iconphoto(True, self._window_icon_image)
+            except Exception:
+                logger.exception("PNG app icon could not be applied.")
+        if os.path.exists(self.app_icon_path):
+            try:
+                self.iconbitmap(self.app_icon_path)
+            except Exception:
+                logger.exception("ICO app icon could not be applied.")
 
     # ---------- Darkmode Toggle ----------
     def toggle_darkmode(self):
