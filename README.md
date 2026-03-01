@@ -1,40 +1,43 @@
 # GAWELA Tourenplaner
 
-Desktop-Anwendung zur Tourenplanung mit MSIX/AppInstaller-Distribution ueber GitHub Releases.
+Desktop-Anwendung zur Tourenplanung mit MSIX/AppInstaller-Distribution über GitHub Releases.
 
 ## Aktueller Release
 
-- Version: `1.0.4`
-- Release: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/tag/v1.0.4`
+- Version: `1.0.5`
+- Release: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/tag/v1.0.5`
 - AppInstaller-Download: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller`
 - MSIX-Download: `https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix`
 
-## Enthalten in v1.0.4
+## Enthalten in v1.0.5
 
-- Update-Menue im Programm
+- Kalender als eigene Seite
+- Kalender-Icon in der Sidebar
+- Korrigierte Umlaute auf Start- und Update-Seite
+- Update-Menü im Programm
 - Neues App-Icon
-- Fix fuer die kurz sichtbare CMD/PowerShell-Konsole beim Start
-- Fallback fuer deaktiviertes `ms-appinstaller`: Die App oeffnet dann direkt die `.appinstaller`-Datei bzw. eine lokal heruntergeladene Kopie
+- Fix für die kurz sichtbare CMD/PowerShell-Konsole beim Start
+- Fallback für deaktiviertes `ms-appinstaller`: Die App öffnet dann direkt die `.appinstaller`-Datei bzw. eine lokal heruntergeladene Kopie
 
 ## Installation auf Windows
 
-1. `GAWELA-Tourenplaner.cer` oeffnen
+1. `GAWELA-Tourenplaner.cer` öffnen
 2. Zertifikat installieren
-3. `Aktueller Benutzer` waehlen
-4. `Alle Zertifikate in folgendem Speicher speichern` waehlen
-5. In `Vertrauenswuerdige Stammzertifizierungsstellen` importieren
-6. Danach `GAWELA-Tourenplaner.appinstaller` oeffnen
+3. `Aktueller Benutzer` wählen
+4. `Alle Zertifikate in folgendem Speicher speichern` wählen
+5. In `Vertrauenswürdige Stammzertifizierungsstellen` importieren
+6. Danach `GAWELA-Tourenplaner.appinstaller` öffnen
 
 ## Auto-Updates
 
-- Fuer automatische Updates muss die App ueber die `.appinstaller`-Datei installiert werden.
-- Die Update-Quelle zeigt auf `releases/latest/download/...` und liefert aktuell `1.0.4.0`.
-- Die veroeffentlichte `.appinstaller`-Datei enthaelt `OnLaunch` und `AutomaticBackgroundTask`.
-- Im Programm steht dafuer das Update-Menue zur Verfuegung.
+- Für automatische Updates muss die App über die `.appinstaller`-Datei installiert werden.
+- Die Update-Quelle zeigt auf `releases/latest/download/...` und liefert aktuell `1.0.5.0`.
+- Die veröffentlichte `.appinstaller`-Datei enthält `OnLaunch` und `AutomaticBackgroundTask`.
+- Im Programm steht dafür das Update-Menü zur Verfügung.
 
 ## Release-Prozess
 
-1. Versionsnummer in `version.txt`, `installer-dist/GAWELA-Tourenplaner.appinstaller`, `installer-dist/msix-package/Package.appxmanifest` und `installer-dist/build-msix.ps1` erhoehen.
+1. Versionsnummer in `version.txt`, `installer-dist/GAWELA-Tourenplaner.appinstaller`, `installer-dist/msix-package/Package.appxmanifest` und `installer-dist/build-msix.ps1` erhöhen.
 2. EXE mit `pyinstaller GAWELA-Tourenplaner.spec --noconfirm` neu bauen.
 3. MSIX mit `powershell -ExecutionPolicy Bypass -File .\\installer-dist\\build-msix.ps1` erstellen.
 4. GitHub-Release-Assets mit `powershell -ExecutionPolicy Bypass -File .\\installer-dist\\prepare-github-release.ps1 -Version "<VERSION>" -PackageName "GAWELA.Tourenplaner" -Publisher "CN=GAWELA" -MsixPath ".\\installer-dist\\GAWELA-Tourenplaner.msix"` vorbereiten.
@@ -46,5 +49,5 @@ Desktop-Anwendung zur Tourenplanung mit MSIX/AppInstaller-Distribution ueber Git
 ## Hinweise
 
 - Das MSIX muss mit derselben Package Identity und demselben Publisher signiert bleiben.
-- Fuer Windows-Updates muss die Paketversion bei jedem Release steigen.
-- Die Installation sollte immer ueber die `.appinstaller`-Datei getestet werden, nicht nur ueber das nackte `.msix`.
+- Für Windows-Updates muss die Paketversion bei jedem Release steigen.
+- Die Installation sollte immer über die `.appinstaller`-Datei getestet werden, nicht nur über das nackte `.msix`.

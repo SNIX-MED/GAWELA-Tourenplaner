@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 class UpdatePage(ctk.CTkFrame):
-    # Testfaelle:
-    # - MSIX installiert via .appinstaller -> Button oeffnet App Installer und Updates werden gefunden.
-    # - Nicht-MSIX (portable) -> UI zeigt Hinweis, Button oeffnet Browser.
+    # Testfälle:
+    # - MSIX installiert via .appinstaller -> Button öffnet App Installer und Updates werden gefunden.
+    # - Nicht-MSIX (portable) -> UI zeigt Hinweis, Button öffnet Browser.
     # - ms-appinstaller Protokoll deaktiviert -> Browser-Fallback + Hinweis.
     # - Kein Internet -> klare Meldung, kein Freeze.
 
@@ -37,12 +37,12 @@ class UpdatePage(ctk.CTkFrame):
         self._toggle_update_in_progress = False
         self._state: dict = {}
 
-        self.internet_var = ctk.StringVar(value="Pruefung laeuft ...")
+        self.internet_var = ctk.StringVar(value="Prüfung läuft ...")
         self.installation_var = ctk.StringVar(value="Wird ermittelt ...")
         self.version_var = ctk.StringVar(value="Wird ermittelt ...")
         self.url_var = ctk.StringVar(value=APPINSTALLER_URL)
         self.status_var = ctk.StringVar(value="Update-Status wird geladen ...")
-        self.auto_update_info_var = ctk.StringVar(value="AutoUpdate-Einstellungen werden geprueft ...")
+        self.auto_update_info_var = ctk.StringVar(value="AutoUpdate-Einstellungen werden geprüft ...")
         self.check_on_launch_var = ctk.BooleanVar(value=False)
 
         self.grid_columnconfigure(0, weight=1)
@@ -266,7 +266,7 @@ class UpdatePage(ctk.CTkFrame):
             return
         self._refresh_running = True
         self.status_var.set("Update-Status wird geladen ...")
-        self.internet_var.set("Pruefung laeuft ...")
+        self.internet_var.set("Prüfung läuft ...")
 
         def _worker():
             try:
@@ -302,7 +302,7 @@ class UpdatePage(ctk.CTkFrame):
         auto_supported = bool(payload.get("auto_supported"))
         auto_settings = payload.get("auto_settings")
 
-        internet_text = "OK" if internet.get("ok") else "Nicht verfuegbar"
+        internet_text = "OK" if internet.get("ok") else "Nicht verfügbar"
         internet_detail = str(internet.get("detail") or "").strip()
         self.internet_var.set(f"{internet_text}" + (f" ({internet_detail})" if internet_detail else ""))
 
@@ -317,11 +317,11 @@ class UpdatePage(ctk.CTkFrame):
             f"Version: {self.version_var.get()}",
         ]
         if installation_type != "msix":
-            status_lines.append("Auto-Update ist nur verfuegbar, wenn die App via .appinstaller (MSIX) installiert wurde.")
+            status_lines.append("Auto-Update ist nur verfügbar, wenn die App via .appinstaller (MSIX) installiert wurde.")
         else:
-            status_lines.append("Updates werden automatisch ueber Windows App Installer geprueft, wenn die .appinstaller-Datei so konfiguriert ist.")
+            status_lines.append("Updates werden automatisch über Windows App Installer geprüft, wenn die .appinstaller-Datei so konfiguriert ist.")
         if not internet.get("ok"):
-            status_lines.append("Kein Update moeglich, solange die AppInstaller-Quelle nicht erreichbar ist.")
+            status_lines.append("Kein Update möglich, solange die AppInstaller-Quelle nicht erreichbar ist.")
         self.status_var.set("\n".join(status_lines))
 
         if installation_type == "msix" and auto_supported:
@@ -335,14 +335,14 @@ class UpdatePage(ctk.CTkFrame):
             self.check_on_launch_var.set(False)
             self.auto_update_switch.configure(state="disabled")
             self.auto_update_info_var.set(
-                "Die Windows-Cmdlets fuer AutoUpdate-Einstellungen sind auf diesem System nicht verfuegbar."
+                "Die Windows-Cmdlets für AutoUpdate-Einstellungen sind auf diesem System nicht verfügbar."
             )
         else:
             self.show_settings_button.configure(state="disabled")
             self.check_on_launch_var.set(False)
             self.auto_update_switch.configure(state="disabled")
             self.auto_update_info_var.set(
-                "Diese Installation ist nicht als MSIX erkannt. Fuer automatische Updates bitte ueber die .appinstaller-Datei installieren."
+                "Diese Installation ist nicht als MSIX erkannt. Für automatische Updates bitte über die .appinstaller-Datei installieren."
             )
 
     def _apply_refresh_error(self, detail: str):
@@ -370,7 +370,7 @@ class UpdatePage(ctk.CTkFrame):
         state = self._state or {}
         internet = state.get("internet", {}) or {}
         if not internet.get("ok"):
-            messagebox.showwarning("Updates", "Kein Update moeglich: Die AppInstaller-Quelle ist aktuell nicht erreichbar.")
+            messagebox.showwarning("Updates", "Kein Update möglich: Die AppInstaller-Quelle ist aktuell nicht erreichbar.")
             return
 
         self.update_now_button.configure(state="disabled")
@@ -406,7 +406,7 @@ class UpdatePage(ctk.CTkFrame):
             messagebox.showinfo("Updates", "Keine Support-URL konfiguriert.")
             return
         if not open_support_url():
-            messagebox.showwarning("Updates", "Die Hilfeseite konnte nicht geoeffnet werden.")
+            messagebox.showwarning("Updates", "Die Hilfeseite konnte nicht geöffnet werden.")
 
     def _toggle_check_on_launch(self):
         if self._toggle_update_in_progress:

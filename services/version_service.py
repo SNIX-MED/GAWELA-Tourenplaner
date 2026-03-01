@@ -123,7 +123,7 @@ def check_update_source_reachable(timeout_seconds: float = NETWORK_TIMEOUT_SECON
 
     parsed = urlparse(APPINSTALLER_URL)
     if not parsed.scheme or not parsed.netloc:
-        return {"ok": False, "detail": "Die AppInstaller-URL ist ungueltig."}
+        return {"ok": False, "detail": "Die AppInstaller-URL ist ungültig."}
 
     request = Request(APPINSTALLER_URL, method="HEAD")
     try:
@@ -143,7 +143,7 @@ def check_update_source_reachable(timeout_seconds: float = NETWORK_TIMEOUT_SECON
 
     try:
         socket.getaddrinfo(host, parsed.port or 443)
-        return {"ok": True, "detail": "DNS-Aufloesung erfolgreich"}
+        return {"ok": True, "detail": "DNS-Auflösung erfolgreich"}
     except OSError as exc:
         _LOGGER.warning("DNS check for AppInstaller host failed: %s", exc)
         return {"ok": False, "detail": "Keine Netzwerkverbindung oder Host nicht erreichbar."}
@@ -159,7 +159,7 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
 
     connectivity = check_update_source_reachable()
     if not connectivity.get("ok"):
-        return {"ok": False, "via": "none", "detail": "Kein Update moeglich: Keine Internetverbindung."}
+        return {"ok": False, "via": "none", "detail": "Kein Update möglich: Keine Internetverbindung."}
 
     protocol_enabled = _is_ms_appinstaller_protocol_enabled()
 
@@ -168,7 +168,7 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
         try:
             os.startfile(uri)
             _LOGGER.info("Triggered App Installer via protocol URI.")
-            return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geoeffnet."}
+            return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geöffnet."}
         except Exception as exc:
             _LOGGER.warning("ms-appinstaller protocol failed: %s", exc)
     elif prefer_appinstaller:
@@ -181,9 +181,9 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
             "ok": True,
             "via": "appinstaller-url",
             "detail": (
-                "Die .appinstaller-Datei wurde geoeffnet."
+                "Die .appinstaller-Datei wurde geöffnet."
                 if not prefer_appinstaller
-                else "Das ms-appinstaller-Protokoll ist deaktiviert oder nicht verfuegbar. Die .appinstaller-Datei wurde direkt geoeffnet."
+                else "Das ms-appinstaller-Protokoll ist deaktiviert oder nicht verfügbar. Die .appinstaller-Datei wurde direkt geöffnet."
             ),
         }
     except Exception as exc:
@@ -197,7 +197,7 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
             return {
                 "ok": True,
                 "via": "appinstaller-file",
-                "detail": "Die .appinstaller-Datei wurde lokal heruntergeladen und geoeffnet.",
+                "detail": "Die .appinstaller-Datei wurde lokal heruntergeladen und geöffnet.",
             }
         except Exception as exc:
             _LOGGER.warning("Opening downloaded AppInstaller file failed: %s", exc)
@@ -209,9 +209,9 @@ def trigger_update_installation(*, prefer_appinstaller: bool = True) -> dict[str
             "ok": True,
             "via": "browser",
             "detail": (
-                "Die .appinstaller-URL wurde im Browser geoeffnet."
+                "Die .appinstaller-URL wurde im Browser geöffnet."
                 if not prefer_appinstaller
-                else "Das ms-appinstaller-Protokoll war nicht verfuegbar. Die .appinstaller-URL wurde im Browser geoeffnet."
+                else "Das ms-appinstaller-Protokoll war nicht verfügbar. Die .appinstaller-URL wurde im Browser geöffnet."
             ),
         }
 
@@ -253,11 +253,11 @@ def get_auto_update_settings(package_family_name: str, *, show_update_availabili
 def set_auto_update_check_on_launch(package_family_name: str, enabled: bool) -> tuple[bool, str]:
     package_family_name = str(package_family_name or "").strip()
     if not package_family_name:
-        return False, "Keine PackageFamilyName verfuegbar."
+        return False, "Keine PackageFamilyName verfügbar."
     if not APPINSTALLER_URL:
         return False, "Keine AppInstaller-URL konfiguriert."
     if not is_auto_update_settings_supported():
-        return False, "Die AutoUpdate-Cmdlets sind auf diesem System nicht verfuegbar."
+        return False, "Die AutoUpdate-Cmdlets sind auf diesem System nicht verfügbar."
 
     script = (
         f"Set-AppxPackageAutoUpdateSettings -PackageFamilyName '{_escape_ps(package_family_name)}' "
@@ -274,7 +274,7 @@ def set_auto_update_check_on_launch(package_family_name: str, enabled: bool) -> 
 
 def format_auto_update_settings(settings: dict[str, Any] | None) -> str:
     if not settings:
-        return "Keine AutoUpdate-Einstellungen verfuegbar."
+        return "Keine AutoUpdate-Einstellungen verfügbar."
 
     preferred_keys = (
         "PackageFamilyName",

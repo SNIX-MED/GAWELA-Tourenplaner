@@ -791,11 +791,191 @@ class TourCalendarWidget(ctk.CTkFrame):
 # ============================================================
 # Pages
 # ============================================================
+class CalendarPage(ctk.CTkFrame):
+    def __init__(self, master, app):
+        super().__init__(master, fg_color=Theme.BG)
+        self.app = app
+        self._selected_date = None
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        shell = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        shell.grid(row=0, column=0, padx=28, pady=28, sticky="nsew")
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
+
+        hero = ctk.CTkFrame(shell, fg_color="transparent")
+        hero.grid(row=0, column=0, padx=30, pady=(28, 18), sticky="ew")
+        hero.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            hero,
+            text="Kalender",
+            font=_font(30, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkLabel(
+            hero,
+            text="Übersicht aller geplanten Touren. Ein Doppelklick öffnet den gewählten Tag in den Liefertouren.",
+            font=_font(14),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+        ).grid(row=1, column=0, pady=(8, 0), sticky="w")
+
+        content = ctk.CTkFrame(shell, fg_color="transparent")
+        content.grid(row=1, column=0, padx=24, pady=(0, 24), sticky="nsew")
+        content.grid_columnconfigure(0, weight=3)
+        content.grid_columnconfigure(1, weight=2)
+        content.grid_rowconfigure(0, weight=1)
+
+        self.calendar = TourCalendarWidget(
+            content,
+            app,
+            on_date_selected=self._on_date_selected,
+            on_date_activated=self._on_date_activated,
+        )
+        self.calendar.grid(row=0, column=0, sticky="nsew")
+
+        details = ctk.CTkFrame(
+            content,
+            corner_radius=16,
+            fg_color=Theme.PANEL_2,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        details.grid(row=0, column=1, padx=(18, 0), sticky="nsew")
+        details.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            details,
+            text="Legende",
+            font=_font(16, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, padx=18, pady=(18, 10), sticky="w")
+
+        self._build_legend_row(details, 1, Theme.WARNING, "1 geplanter Mitarbeitereinsatz")
+        self._build_legend_row(details, 2, Theme.DANGER, "2 oder mehr Mitarbeitereinsätze")
+        self._build_legend_row(details, 3, Theme.PANEL, "Kein Eintrag für den Tag")
+
+        ctk.CTkLabel(
+            details,
+            text="Tag",
+            font=_font(16, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=4, column=0, padx=18, pady=(22, 6), sticky="w")
+
+        self.selection_label = ctk.CTkLabel(
+            details,
+            text="Noch kein Datum ausgewählt.",
+            font=_font(14),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=320,
+        )
+        self.selection_label.grid(row=5, column=0, padx=18, pady=(0, 8), sticky="w")
+
+        self.summary_label = ctk.CTkLabel(
+            details,
+            text="",
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=320,
+        )
+        self.summary_label.grid(row=6, column=0, padx=18, pady=(0, 8), sticky="w")
+
+        self.titles_label = ctk.CTkLabel(
+            details,
+            text="",
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=320,
+        )
+        self.titles_label.grid(row=7, column=0, padx=18, pady=(0, 18), sticky="w")
+
+    def _build_legend_row(self, master, row: int, color, text: str):
+        row_frame = ctk.CTkFrame(master, fg_color="transparent")
+        row_frame.grid(row=row, column=0, padx=18, pady=4, sticky="ew")
+        row_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkFrame(
+            row_frame,
+            width=18,
+            height=18,
+            corner_radius=6,
+            fg_color=color,
+            border_width=1,
+            border_color=Theme.BORDER,
+        ).grid(row=0, column=0, padx=(0, 10), sticky="w")
+
+        ctk.CTkLabel(
+            row_frame,
+            text=text,
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+        ).grid(row=0, column=1, sticky="w")
+
+    def _update_selection_details(self, date_key: str | None, payload: dict | None):
+        self._selected_date = date_key
+        if not date_key:
+            self.selection_label.configure(text="Noch kein Datum ausgewählt.")
+            self.summary_label.configure(text="")
+            self.titles_label.configure(text="")
+            return
+
+        self.selection_label.configure(text=f"Ausgewählt: {_display_date_string(date_key)}")
+
+        payload = payload or {}
+        tours = int(payload.get("tours", 0) or 0)
+        assignments = int(payload.get("assignments", 0) or 0)
+        if tours <= 0:
+            self.summary_label.configure(text="Für dieses Datum sind keine Touren geplant.")
+            self.titles_label.configure(text="")
+            return
+
+        self.summary_label.configure(
+            text=f"Geplante Touren: {tours} | Mitarbeitereinsätze: {assignments}"
+        )
+        titles = [str(title).strip() for title in payload.get("titles", []) if str(title).strip()]
+        if titles:
+            self.titles_label.configure(text="Touren: " + " | ".join(titles[:4]))
+        else:
+            self.titles_label.configure(text="")
+
+    def _on_date_selected(self, date_key: str, payload: dict | None):
+        self._update_selection_details(date_key, payload)
+
+    def _on_date_activated(self, date_key: str, payload: dict | None):
+        self._update_selection_details(date_key, payload)
+        self.app.set_active_date(date_key)
+        self.app.show_page("tours")
+
+    def refresh_calendar(self):
+        self.calendar.refresh()
+        if self._selected_date:
+            payload = self.app.get_calendar_payload_map().get(self._selected_date)
+            self._update_selection_details(self._selected_date, payload)
+
+    def refresh(self):
+        self.refresh_calendar()
+
+
 class StartMenuPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=Theme.BG)
         self.app = app
         self._update_hint_label = None
+        self._logo_image = self._load_logo_image()
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -809,152 +989,115 @@ class StartMenuPage(ctk.CTkFrame):
         )
         shell.grid(row=0, column=0, padx=28, pady=28, sticky="nsew")
         shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
+
+        hero = ctk.CTkFrame(shell, fg_color="transparent")
+        hero.grid(row=0, column=0, padx=30, pady=(30, 16), sticky="ew")
+        hero.grid_columnconfigure(0, weight=1)
+
+        if self._logo_image is not None:
+            ctk.CTkLabel(hero, text="", image=self._logo_image).grid(row=0, column=0, pady=(0, 18))
 
         title = ctk.CTkLabel(
-            shell, text="GAWELA Tourenplaner", font=_font(30, "bold"), text_color=Theme.TEXT
+            hero, text="GAWELA Tourenplaner", font=_font(32, "bold"), text_color=Theme.TEXT
         )
-        title.grid(row=0, column=0, pady=(28, 6), padx=24, sticky="w")
+        title.grid(row=1, column=0, sticky="n")
 
         subtitle = ctk.CTkLabel(
-            shell,
-            text="Karte, XML-Import, Pins, Liefertouren – alles an einem Ort.",
-            font=_font(14),
+            hero,
+            text="Startseite mit Direktzugriff auf alle Bereiche.",
+            font=_font(15),
             text_color=Theme.SUBTEXT,
+            justify="center",
         )
-        subtitle.grid(row=1, column=0, pady=(0, 18), padx=24, sticky="w")
+        subtitle.grid(row=2, column=0, pady=(8, 0), sticky="n")
 
-        actions = ctk.CTkFrame(shell, fg_color="transparent")
-        actions.grid(row=2, column=0, padx=24, pady=(8, 18), sticky="ew")
-        actions.grid_columnconfigure((0, 1, 2), weight=1)
-
-        btn_map = ctk.CTkButton(
-            actions,
-            text="Karte & Suche",
-            height=52,
-            corner_radius=14,
-            font=_font(15, "bold"),
-            fg_color=Theme.ACCENT,
-            hover_color=Theme.ACCENT_HOVER,
-            command=lambda: app.show_page("map"),
-        )
-        btn_map.grid(row=0, column=0, padx=(0, 12), pady=10, sticky="ew")
-
-        btn_list = ctk.CTkButton(
-            actions,
-            text="Auftragsliste",
-            height=52,
-            corner_radius=14,
-            font=_font(15, "bold"),
-            fg_color=Theme.PANEL_2,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.show_page("list"),
-        )
-        btn_list.grid(row=0, column=1, padx=12, pady=10, sticky="ew")
-
-        btn_tours = ctk.CTkButton(
-            actions,
-            text="Liefertouren",
-            height=52,
-            corner_radius=14,
-            font=_font(15, "bold"),
-            fg_color=Theme.PANEL_2,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.show_page("tours"),
-        )
-        btn_tours.grid(row=0, column=2, padx=(12, 0), pady=10, sticky="ew")
-
-        btn_employees = ctk.CTkButton(
-            actions,
-            text="Mitarbeiterverwaltung",
-            height=52,
-            corner_radius=14,
-            font=_font(15, "bold"),
-            fg_color=Theme.PANEL_2,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.show_page("employees"),
-        )
-        btn_employees.grid(row=1, column=0, padx=(0, 12), pady=10, sticky="ew")
-
-        btn_vehicles = ctk.CTkButton(
-            actions,
-            text="Fahrzeugverwaltung",
-            height=52,
-            corner_radius=14,
-            font=_font(15, "bold"),
-            fg_color=Theme.PANEL_2,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.show_page("vehicles"),
-        )
-        btn_vehicles.grid(row=1, column=1, padx=12, pady=10, sticky="ew")
-
-        if SHOW_UPDATE_PAGE_IN_MENU:
-            btn_updates = ctk.CTkButton(
-                actions,
-                text="Updates",
-                height=52,
-                corner_radius=14,
-                font=_font(15, "bold"),
-                fg_color=Theme.PANEL_2,
-                hover_color=Theme.BORDER,
-                text_color=Theme.TEXT,
-                command=lambda: app.show_page("update"),
-            )
-            btn_updates.grid(row=1, column=2, padx=(12, 0), pady=10, sticky="ew")
-
-        calendar_shell = ctk.CTkFrame(
+        launcher = ctk.CTkFrame(
             shell,
             corner_radius=16,
             fg_color=Theme.PANEL_2,
             border_width=1,
             border_color=Theme.BORDER,
         )
-        calendar_shell.grid(row=3, column=0, padx=24, pady=(0, 16), sticky="ew")
-        calendar_shell.grid_columnconfigure(0, weight=1)
+        launcher.grid(row=1, column=0, padx=24, pady=(0, 18), sticky="nsew")
+        launcher.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkLabel(
-            calendar_shell,
-            text="Tourenkalender",
-            font=_font(15, "bold"),
+            launcher,
+            text="Bereiche",
+            font=_font(18, "bold"),
             text_color=Theme.TEXT,
-        ).grid(row=0, column=0, padx=14, pady=(14, 8), sticky="w")
+        ).grid(row=0, column=0, columnspan=2, padx=20, pady=(20, 6), sticky="w")
 
-        self.calendar_widget = TourCalendarWidget(
-            calendar_shell,
-            app,
-            on_date_selected=self._on_calendar_date_selected,
-            on_date_activated=self._on_calendar_date_activated,
-        )
-        self.calendar_widget.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
-
-        self.calendar_info = ctk.CTkLabel(
-            calendar_shell,
-            text="Kein Datum ausgewählt.",
+        ctk.CTkLabel(
+            launcher,
+            text="Die linke Navigation wird erst nach dem Wechsel in einen Bereich eingeblendet.",
             font=_font(13),
             text_color=Theme.SUBTEXT,
             justify="left",
+        ).grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 12), sticky="w")
+
+        for index, (page_name, label) in enumerate(self._navigation_items()):
+            row = (index // 2) + 2
+            column = index % 2
+            is_primary = index == 0
+            button = ctk.CTkButton(
+                launcher,
+                text=label,
+                height=58,
+                corner_radius=16,
+                font=_font(15, "bold"),
+                fg_color=Theme.ACCENT if is_primary else Theme.PANEL,
+                hover_color=Theme.ACCENT_HOVER if is_primary else Theme.BORDER,
+                text_color=("white", "white") if is_primary else Theme.TEXT,
+                command=lambda name=page_name: app.show_page(name),
+            )
+            padx = (20, 10) if column == 0 else (10, 20)
+            button.grid(row=row, column=column, padx=padx, pady=10, sticky="ew")
+
+        utility = ctk.CTkFrame(shell, fg_color="transparent")
+        utility.grid(row=2, column=0, padx=24, pady=(0, 24), sticky="ew")
+        utility.grid_columnconfigure(0, weight=1)
+        utility.grid_columnconfigure(1, weight=0)
+
+        info_card = ctk.CTkFrame(
+            utility,
+            corner_radius=16,
+            fg_color=Theme.PANEL_2,
+            border_width=1,
+            border_color=Theme.BORDER,
         )
-        self.calendar_info.grid(row=2, column=0, padx=14, pady=(0, 10), sticky="w")
+        info_card.grid(row=0, column=0, sticky="ew")
+        info_card.grid_columnconfigure(0, weight=1)
 
-        calendar_actions = ctk.CTkFrame(calendar_shell, fg_color="transparent")
-        calendar_actions.grid(row=3, column=0, padx=14, pady=(0, 14), sticky="ew")
-        calendar_actions.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            info_card,
+            text="Hinweis",
+            font=_font(15, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
 
-        ctk.CTkButton(
-            calendar_actions,
-            text="Touren öffnen",
-            height=36,
-            corner_radius=12,
-            fg_color=Theme.ACCENT,
-            hover_color=Theme.ACCENT_HOVER,
-            command=self._open_tours_for_selected_date,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self._update_hint_label = ctk.CTkLabel(
+            info_card,
+            text="Update-Status wird geladen ...",
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=780,
+        )
+        self._update_hint_label.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="w")
+
+        ctk.CTkLabel(
+            info_card,
+            text="Von hier aus lassen sich Karte, Aufträge, Touren, Mitarbeiter, Fahrzeuge und Einstellungen direkt öffnen.",
+            font=_font(13),
+            text_color=Theme.SUBTEXT,
+            justify="left",
+            wraplength=780,
+        ).grid(row=2, column=0, padx=16, pady=(0, 14), sticky="w")
 
         self.btn_darkmode = ctk.CTkButton(
-            shell,
+            utility,
             text=self._dark_btn_text(),
             height=40,
             corner_radius=14,
@@ -964,31 +1107,36 @@ class StartMenuPage(ctk.CTkFrame):
             text_color=Theme.TEXT,
             command=self._toggle_dark,
         )
-        self.btn_darkmode.grid(row=4, column=0, padx=24, pady=(0, 16), sticky="w")
-
-        self._update_hint_label = ctk.CTkLabel(
-            shell,
-            text="Update-Status wird geladen ...",
-            font=_font(13),
-            text_color=Theme.SUBTEXT,
-            justify="left",
-            wraplength=980,
-        )
-        self._update_hint_label.grid(row=5, column=0, pady=(0, 10), padx=24, sticky="w")
-
-        hint = ctk.CTkLabel(
-            shell,
-            text="Tipp: Du kannst einen XML-Ordner speichern – neue Dateien werden automatisch erkannt.",
-            font=_font(13),
-            text_color=Theme.SUBTEXT,
-        )
-        hint.grid(row=6, column=0, pady=(0, 24), padx=24, sticky="w")
-
-        self.refresh_calendar()
+        self.btn_darkmode.grid(row=0, column=1, padx=(16, 0), sticky="e")
 
     def _dark_btn_text(self):
         mode = ctk.get_appearance_mode()
         return "Darkmode: AUS" if mode == "Dark" else "Darkmode: EIN"
+
+    def _load_logo_image(self):
+        path = getattr(self.app, "app_logo_path", "")
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            image = Image.open(path)
+            return ctk.CTkImage(light_image=image, dark_image=image, size=(240, 240))
+        except Exception:
+            logger.exception("Start page logo could not be loaded.")
+            return None
+
+    def _navigation_items(self):
+        items = [
+            ("calendar", "Kalender"),
+            ("map", "Karte"),
+            ("list", "Auftragsliste"),
+            ("tours", "Liefertouren"),
+            ("employees", "Mitarbeiter"),
+            ("vehicles", "Fahrzeuge"),
+            ("settings", "Einstellungen"),
+        ]
+        if SHOW_UPDATE_PAGE_IN_MENU:
+            items.append(("update", "Updates"))
+        return items
 
     def _toggle_dark(self):
         self.app.toggle_darkmode()
@@ -999,42 +1147,10 @@ class StartMenuPage(ctk.CTkFrame):
             self.btn_darkmode.configure(text=self._dark_btn_text())
         except Exception:
             pass
-        self.refresh_calendar()
-
-    def refresh_calendar(self):
-        try:
-            self.calendar_widget.refresh()
-            if not self.calendar_widget.selected_date:
-                self.calendar_widget.select_date(datetime.now().strftime("%d-%m-%Y"))
-        except Exception:
-            pass
 
     def refresh(self):
-        self.refresh_calendar()
         if self._update_hint_label is not None and hasattr(self.app, "get_startup_update_message"):
             self._update_hint_label.configure(text=self.app.get_startup_update_message())
-
-    def _on_calendar_date_selected(self, date_key: str, payload):
-        self.app.set_active_date(date_key)
-        if not payload:
-            self.calendar_info.configure(text=f"{_display_date_string(date_key)}: Keine geplanten Liefertouren.")
-            return
-        tour_count = int(payload.get("tours", 0))
-        assignments = int(payload.get("assignments", 0))
-        titles = payload.get("titles", []) or []
-        text = f"{_display_date_string(date_key)}: {tour_count} Tour(en), {assignments} Einsatz/Einsätze"
-        if titles:
-            text = f"{text}\n" + " / ".join(titles[:2]) + (" ..." if len(titles) > 2 else "")
-        self.calendar_info.configure(text=text)
-
-    def _open_tours_for_selected_date(self):
-        if getattr(self.calendar_widget, "selected_date", None):
-            self.app.set_active_date(self.calendar_widget.selected_date)
-        self.app.show_page("tours")
-
-    def _on_calendar_date_activated(self, date_key: str, payload):
-        self.app.set_active_date(date_key)
-        self.app.show_page("tours")
 
 
 class MapPage(ctk.CTkFrame):
@@ -1058,7 +1174,7 @@ class MapPage(ctk.CTkFrame):
 
         ctk.CTkLabel(
             topbar,
-            text="Karte & Suche",
+            text="Karte",
             font=_font(18, "bold"),
             text_color=Theme.TEXT,
         ).grid(row=0, column=0, padx=16, pady=14, sticky="w")
@@ -2724,6 +2840,7 @@ class ModernApp(ctk.CTk):
         self._tv_even_bg = "#FFFFFF"
         self._tv_odd_bg = "#F6F6F6"
         self.sidebar_collapsed = False
+        self.sidebar_visible = True
         self.sidebar_expanded_width = 250
         self.sidebar_collapsed_width = 84
         self.sidebar_icons = self._load_sidebar_icons()
@@ -2746,7 +2863,7 @@ class ModernApp(ctk.CTk):
         self.sidebar = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.PANEL, border_width=0, width=self.sidebar_expanded_width)
         self.sidebar.grid(row=0, column=0, sticky="nsw")
         self.sidebar.grid_propagate(False)
-        self.sidebar.grid_rowconfigure(10, weight=1)
+        self.sidebar.grid_rowconfigure(11, weight=1)
 
         brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         brand.grid(row=0, column=0, padx=16, pady=(18, 10), sticky="ew")
@@ -2781,14 +2898,23 @@ class ModernApp(ctk.CTk):
         )
         self.nav_menu.grid(row=1, column=0, padx=14, pady=(10, 8), sticky="ew")
 
+        self.nav_calendar = NavButton(
+            self.sidebar,
+            "Kalender",
+            command=lambda: self.show_page("calendar"),
+            compact_icon="◷",
+            compact_image=self.sidebar_icons.get("Kalender"),
+        )
+        self.nav_calendar.grid(row=2, column=0, padx=14, pady=8, sticky="ew")
+
         self.nav_map = NavButton(
             self.sidebar,
-            "Karte & Suche",
+            "Karte",
             command=lambda: self.show_page("map"),
             compact_icon="⌖",
-            compact_image=self.sidebar_icons.get("Karte & Suche"),
+            compact_image=self.sidebar_icons.get("Karte"),
         )
-        self.nav_map.grid(row=2, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_map.grid(row=3, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_list = NavButton(
             self.sidebar,
@@ -2797,7 +2923,7 @@ class ModernApp(ctk.CTk):
             compact_icon="≣",
             compact_image=self.sidebar_icons.get("Auftragsliste"),
         )
-        self.nav_list.grid(row=3, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_list.grid(row=4, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_tours = NavButton(
             self.sidebar,
@@ -2806,7 +2932,7 @@ class ModernApp(ctk.CTk):
             compact_icon="↦",
             compact_image=self.sidebar_icons.get("Liefertouren"),
         )
-        self.nav_tours.grid(row=4, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_tours.grid(row=5, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_employees = NavButton(
             self.sidebar,
@@ -2815,7 +2941,7 @@ class ModernApp(ctk.CTk):
             compact_icon="◉",
             compact_image=self.sidebar_icons.get("Mitarbeiter"),
         )
-        self.nav_employees.grid(row=5, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_employees.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_vehicles = NavButton(
             self.sidebar,
@@ -2824,7 +2950,7 @@ class ModernApp(ctk.CTk):
             compact_icon="▣",
             compact_image=self.sidebar_icons.get("Fahrzeuge"),
         )
-        self.nav_vehicles.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_vehicles.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_settings = NavButton(
             self.sidebar,
@@ -2833,7 +2959,7 @@ class ModernApp(ctk.CTk):
             compact_icon="⚙",
             compact_image=self.sidebar_icons.get("Einstellungen"),
         )
-        self.nav_settings.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_settings.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_update = None
         if SHOW_UPDATE_PAGE_IN_MENU:
@@ -2843,7 +2969,7 @@ class ModernApp(ctk.CTk):
                 command=lambda: self.show_page("update"),
                 compact_icon="↻",
             )
-            self.nav_update.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
+            self.nav_update.grid(row=9, column=0, padx=14, pady=8, sticky="ew")
 
         tools = ctk.CTkFrame(
             self.sidebar,
@@ -2852,7 +2978,7 @@ class ModernApp(ctk.CTk):
             border_width=1,
             border_color=Theme.BORDER,
         )
-        tools.grid(row=9, column=0, padx=14, pady=(10, 12), sticky="ew")
+        tools.grid(row=10, column=0, padx=14, pady=(10, 12), sticky="ew")
         tools.grid_columnconfigure(0, weight=1)
         self.sidebar_tools = tools
 
@@ -2867,7 +2993,7 @@ class ModernApp(ctk.CTk):
         self.refresh_quick_access_tools()
 
         self.sidebar_footer = ctk.CTkLabel(self.sidebar, text="© GAWELA", font=_font(12), text_color=Theme.SUBTEXT)
-        self.sidebar_footer.grid(row=11, column=0, padx=14, pady=(0, 14), sticky="w")
+        self.sidebar_footer.grid(row=12, column=0, padx=14, pady=(0, 14), sticky="w")
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.grid(row=0, column=1, sticky="nsew")
@@ -2876,6 +3002,7 @@ class ModernApp(ctk.CTk):
 
         self.pages = {
             "menu": StartMenuPage(self.container, self),
+            "calendar": CalendarPage(self.container, self),
             "map": MapPage(self.container, self),
             "list": XmlListPage(self.container, self),
             "tours": ToursPage(self.container, self),
@@ -2954,6 +3081,7 @@ class ModernApp(ctk.CTk):
     # ---------- Navigation ----------
     def _set_nav_selected(self, key: str):
         self.nav_menu.set_selected(key == "menu")
+        self.nav_calendar.set_selected(key == "calendar")
         self.nav_map.set_selected(key == "map")
         self.nav_list.set_selected(key == "list")
         self.nav_tours.set_selected(key == "tours")
@@ -2985,6 +3113,7 @@ class ModernApp(ctk.CTk):
     def _sidebar_nav_buttons(self):
         buttons = [
             self.nav_menu,
+            self.nav_calendar,
             self.nav_map,
             self.nav_list,
             self.nav_tours,
@@ -3018,12 +3147,34 @@ class ModernApp(ctk.CTk):
         self.grid_columnconfigure(0, minsize=width)
         self.sidebar.configure(width=width)
 
+    def _get_sidebar_target_width(self) -> int:
+        return self.sidebar_collapsed_width if self.sidebar_collapsed else self.sidebar_expanded_width
+
+    def _set_sidebar_visible(self, visible: bool):
+        visible = bool(visible)
+        if visible == self.sidebar_visible:
+            if visible:
+                self._set_sidebar_width(self._get_sidebar_target_width())
+                self.container.grid_configure(column=1, columnspan=1)
+            return
+
+        self.sidebar_visible = visible
+        if visible:
+            self.sidebar.grid()
+            self._set_sidebar_width(self._get_sidebar_target_width())
+            self.container.grid_configure(column=1, columnspan=1)
+        else:
+            self.sidebar.grid_remove()
+            self.grid_columnconfigure(0, minsize=0)
+            self.container.grid_configure(column=0, columnspan=2)
+
     def toggle_sidebar(self):
         self.sidebar_collapsed = not self.sidebar_collapsed
-        target_width = self.sidebar_collapsed_width if self.sidebar_collapsed else self.sidebar_expanded_width
+        target_width = self._get_sidebar_target_width()
         self._set_sidebar_toggle_text(self.sidebar_collapsed)
         self._apply_sidebar_layout_state(self.sidebar_collapsed)
-        self._set_sidebar_width(target_width)
+        if self.sidebar_visible:
+            self._set_sidebar_width(target_width)
         self._configure_sidebar_toggle_button()
 
     def get_quick_access_options(self) -> list[tuple[str, str]]:
@@ -3033,7 +3184,8 @@ class ModernApp(ctk.CTk):
             ("action:import_folder", "Ordner importieren"),
             ("action:select_xml", "XML-Ordner wählen"),
             ("page:menu", "Start"),
-            ("page:map", "Karte & Suche"),
+            ("page:calendar", "Kalender"),
+            ("page:map", "Karte"),
             ("page:list", "Auftragsliste"),
             ("page:tours", "Liefertouren"),
             ("page:employees", "Mitarbeiter"),
@@ -3142,10 +3294,11 @@ class ModernApp(ctk.CTk):
         if not page:
             messagebox.showerror("Navigation", f"Seite '{name}' ist nicht registriert.")
             return
+        self._set_sidebar_visible(name != "menu")
         self.current_page = name
         page.tkraise()
         self._set_nav_selected(name)
-        if name in ("menu", "list", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
+        if name in ("menu", "calendar", "list", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
             page.refresh()
         if hasattr(page, "on_show"):
             try:
@@ -3186,8 +3339,8 @@ class ModernApp(ctk.CTk):
     def _build_startup_update_message(self, context: dict) -> str:
         version = str(context.get("version") or "Unbekannt")
         if context.get("installation_type") == "msix":
-            return f"Version {version}. Updates werden automatisch ueber App Installer geprueft, wenn die Installation ueber .appinstaller erfolgt ist."
-        return f"Version {version}. Fuer Auto-Updates bitte die App ueber die .appinstaller-Datei als MSIX installieren."
+            return f"Version {version}. Updates werden automatisch über App Installer geprüft, wenn die Installation über .appinstaller erfolgt ist."
+        return f"Version {version}. Für Auto-Updates bitte die App über die .appinstaller-Datei als MSIX installieren."
 
     def get_startup_update_message(self) -> str:
         return str(self._update_runtime_context.get("startup_message") or "Update-Status wird geladen ...")
@@ -5479,7 +5632,8 @@ class ModernApp(ctk.CTk):
     def _load_sidebar_icons(self) -> dict:
         icon_specs = {
             "Start": "Start.png",
-            "Karte & Suche": "Karte & Suche.png",
+            "Kalender": "Kalender.png",
+            "Karte": "Karte & Suche.png",
             "Auftragsliste": "Auftragsliste.png",
             "Liefertouren": "Liefertouren.png",
             "Mitarbeiter": "Mitarbeiter.png",
@@ -6220,7 +6374,7 @@ class ModernApp(ctk.CTk):
 
     def _refresh_tour_related_views(self):
         try:
-            page = self.pages.get("menu")
+            page = self.pages.get("calendar")
             if page and hasattr(page, "refresh_calendar"):
                 page.refresh_calendar()
         except Exception:
