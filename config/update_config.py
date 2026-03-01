@@ -8,8 +8,8 @@ from __future__ import annotations
 # - Gruppenrichtlinien / App Installer Policies pruefen, falls `ms-appinstaller` deaktiviert ist.
 
 APP_NAME = "GAWELA Tourenplaner"
-APPINSTALLER_URL = "https://example.com/GAWELA-Tourenplaner.appinstaller"
-SUPPORT_URL = "https://example.com/update-help"
+APPINSTALLER_URL = "https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"
+SUPPORT_URL = "https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases"
 REQUIRE_MSIX_FOR_AUTOUPDATE = True
 SHOW_UPDATE_PAGE_IN_MENU = True
 

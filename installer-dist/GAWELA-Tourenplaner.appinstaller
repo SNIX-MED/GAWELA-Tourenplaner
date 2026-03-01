@@ -8,15 +8,18 @@
   5. Installation und Update ueber die .appinstaller-Datei testen
   6. Zertifikatsvertrauen und eventuelle App Installer Policies pruefen
 
+  Diese Datei ist fuer GitHub Releases vorbereitet.
+  Lade pro Release immer genau diese beiden Assets mit konstantem Namen hoch:
+  - GAWELA-Tourenplaner.appinstaller
+  - GAWELA-Tourenplaner.msix
+
   Pflichtfelder vor dem ersten echten Release:
-  - Uri
   - MainPackage Name
   - MainPackage Publisher
   - MainPackage Version
-  - MainPackage Uri
 -->
 <AppInstaller
-    Uri="https://your-host.example.com/GAWELA-Tourenplaner.appinstaller"
+    Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.appinstaller"
     Version="1.0.0.0"
     xmlns="http://schemas.microsoft.com/appx/appinstaller/2021">
 
@@ -25,7 +28,7 @@
       Publisher="CN=YOUR-COMPANY"
       Version="1.0.0.0"
       ProcessorArchitecture="x64"
-      Uri="https://your-host.example.com/releases/GAWELA-Tourenplaner_1.0.0.0_x64.msix" />
+      Uri="https://github.com/SNIX-MED/GAWELA-Tourenplaner/releases/latest/download/GAWELA-Tourenplaner.msix" />
 
   <UpdateSettings>
     <OnLaunch
