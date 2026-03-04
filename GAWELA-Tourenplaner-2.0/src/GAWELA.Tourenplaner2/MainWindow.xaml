@@ -1,0 +1,100 @@
+<Window x:Class="GAWELA.Tourenplaner2.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="GAWELA Tourenplaner 2.0"
+        Height="780"
+        Width="1240"
+        WindowStartupLocation="CenterScreen">
+
+    <DockPanel Background="#1F2937">
+        <Border DockPanel.Dock="Top" Background="#111827" Padding="18">
+            <TextBlock Foreground="White" FontSize="22" FontWeight="Bold" Text="GAWELA Tourenplaner 2.0" />
+        </Border>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Background="#0F172A" Padding="12">
+                <StackPanel>
+                    <TextBlock Foreground="#9CA3AF" FontWeight="SemiBold" Margin="0,0,0,12" Text="Navigation" />
+                    <Button Content="Start" Margin="0,0,0,8" Click="OnGoStart" />
+                    <Button Content="Mitarbeiter" Margin="0,0,0,8" Click="OnGoEmployees" />
+                    <Button Content="Fahrzeuge" Margin="0,0,0,8" Click="OnGoVehicles" />
+                    <Button Content="Touren" Margin="0,0,0,8" Click="OnGoTours" />
+                </StackPanel>
+            </Border>
+
+            <TabControl x:Name="MainTabControl" Grid.Column="1" Margin="10">
+                <TabItem Header="Start">
+                    <Grid Margin="14">
+                        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Willkommen im GAWELA Tourenplaner 2.0" />
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Mitarbeiter">
+                    <Grid Margin="14">
+                        <DataGrid x:Name="EmployeesGrid" AutoGenerateColumns="False" IsReadOnly="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" />
+                                <DataGridTextColumn Header="Kürzel" Binding="{Binding Short}" Width="120" />
+                                <DataGridTextColumn Header="Telefon" Binding="{Binding Phone}" Width="180" />
+                                <DataGridCheckBoxColumn Header="Aktiv" Binding="{Binding Active}" Width="80" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Fahrzeuge">
+                    <Grid Margin="14">
+                        <DataGrid x:Name="VehiclesGrid" AutoGenerateColumns="False" IsReadOnly="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" />
+                                <DataGridTextColumn Header="Kennzeichen" Binding="{Binding LicensePlate}" Width="180" />
+                                <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="120" />
+                                <DataGridTextColumn Header="Nutzlast (kg)" Binding="{Binding MaxPayloadKg}" Width="140" />
+                                <DataGridCheckBoxColumn Header="Aktiv" Binding="{Binding Active}" Width="80" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem Header="Touren">
+                    <Grid Margin="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock VerticalAlignment="Center" Margin="0,0,8,0" Foreground="#111827" Text="Startzeit:" />
+                            <TextBox x:Name="StartTimeTextBox" Width="90" Text="08:00" />
+                            <Button Margin="10,0,0,0" Padding="12,2" Click="OnComputeSchedule" Content="ETA/ETD berechnen" />
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="1" x:Name="ScheduleSummaryText" Margin="0,0,0,8" />
+
+                        <DataGrid Grid.Row="2" x:Name="TourStopsGrid" AutoGenerateColumns="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="#" Binding="{Binding Order}" Width="50" />
+                                <DataGridTextColumn Header="Stopp" Binding="{Binding Name}" Width="*" />
+                                <DataGridTextColumn Header="Fenster Start" Binding="{Binding TimeWindowStart}" Width="120" />
+                                <DataGridTextColumn Header="Fenster Ende" Binding="{Binding TimeWindowEnd}" Width="120" />
+                                <DataGridTextColumn Header="Service (min)" Binding="{Binding ServiceMinutes}" Width="100" />
+                                <DataGridTextColumn Header="Ankunft" Binding="{Binding PlannedArrival}" Width="90" />
+                                <DataGridTextColumn Header="Abfahrt" Binding="{Binding PlannedDeparture}" Width="90" />
+                                <DataGridCheckBoxColumn Header="Konflikt" Binding="{Binding ScheduleConflict}" Width="80" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+        </Grid>
+    </DockPanel>
+</Window>
