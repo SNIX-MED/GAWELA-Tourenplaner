@@ -8,12 +8,14 @@ from services.json_storage import InvalidJsonFileError, atomic_write_json, load_
 class SettingsManager:
     DEFAULT_QUICK_ACCESS = [
         "action:export_route",
-        "action:import_folder",
+        "action:import_sql",
         "",
         "",
     ]
     DEFAULTS = {
-        "xml_folder": "",
+        "sql_data_dir": r"C:\Program Files\Microsoft SQL Server\MSSQL15.SQLEXPRESS\MSSQL\DATA",
+        "sql_server_instance": r".\SQLEXPRESS",
+        "sql_database": "",
         "appearance_mode": "System",
         "quick_access_items": list(DEFAULT_QUICK_ACCESS),
         "backups_enabled": False,
@@ -73,7 +75,15 @@ class SettingsManager:
     def validate(self, settings: dict) -> dict:
         settings = dict(self.DEFAULTS) | dict(settings or {})
 
-        xml_folder = str(settings.get("xml_folder") or "").strip()
+        sql_data_dir = str(settings.get("sql_data_dir") or "").strip()
+        if not sql_data_dir:
+            sql_data_dir = str(self.DEFAULTS["sql_data_dir"])
+        # Backward-compatibility migration for old XML setting.
+        legacy_xml_folder = str(settings.get("xml_folder") or "").strip()
+        if legacy_xml_folder and not str(settings.get("sql_data_dir") or "").strip():
+            sql_data_dir = legacy_xml_folder
+        sql_server_instance = str(settings.get("sql_server_instance") or r".\SQLEXPRESS").strip() or r".\SQLEXPRESS"
+        sql_database = str(settings.get("sql_database") or "").strip()
         appearance_mode = str(settings.get("appearance_mode") or "System").title()
         raw_quick_access = settings.get("quick_access_items", self.DEFAULT_QUICK_ACCESS)
         quick_access_items = []
@@ -114,7 +124,9 @@ class SettingsManager:
             raise ValueError(f"backup_dir is not writable: {backup_dir}") from exc
 
         return {
-            "xml_folder": xml_folder,
+            "sql_data_dir": sql_data_dir,
+            "sql_server_instance": sql_server_instance,
+            "sql_database": sql_database,
             "appearance_mode": appearance_mode,
             "quick_access_items": quick_access_items,
             "backups_enabled": bool(settings.get("backups_enabled", False)),

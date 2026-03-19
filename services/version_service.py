@@ -246,7 +246,7 @@ def trigger_update_installation_fresh(*, prefer_appinstaller: bool = True) -> di
 
     connectivity = check_update_source_reachable()
     if not connectivity.get("ok"):
-        return {"ok": False, "via": "none", "detail": "Kein Update moeglich: Keine Internetverbindung."}
+        return {"ok": False, "via": "none", "detail": "Kein Update möglich: Keine Internetverbindung."}
 
     protocol_enabled = _is_ms_appinstaller_protocol_enabled()
     if prefer_appinstaller and protocol_enabled:
@@ -254,7 +254,7 @@ def trigger_update_installation_fresh(*, prefer_appinstaller: bool = True) -> di
         try:
             os.startfile(uri)
             _LOGGER.info("Triggered App Installer via protocol URI.")
-            return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geoeffnet."}
+            return {"ok": True, "via": "ms-appinstaller", "detail": "App Installer wurde geöffnet."}
         except Exception as exc:
             _LOGGER.warning("ms-appinstaller protocol failed: %s", exc)
 
@@ -266,7 +266,7 @@ def trigger_update_installation_fresh(*, prefer_appinstaller: bool = True) -> di
             return {
                 "ok": True,
                 "via": "appinstaller-file",
-                "detail": "Die .appinstaller-Datei wurde frisch heruntergeladen und geoeffnet.",
+                "detail": "Die .appinstaller-Datei wurde frisch heruntergeladen und geöffnet.",
             }
         except Exception as exc:
             _LOGGER.warning("Opening downloaded AppInstaller file failed: %s", exc)
@@ -561,7 +561,7 @@ def _run_powershell(script: str, *, timeout: int = 5, raise_on_error: bool = Tru
             creationflags=creationflags,
         )
     except subprocess.TimeoutExpired:
-        message = f"PowerShell-Aufruf hat das Zeitlimit von {timeout}s ueberschritten."
+        message = f"PowerShell-Aufruf hat das Zeitlimit von {timeout}s überschritten."
         if raise_on_error:
             raise RuntimeError(message)
         _LOGGER.warning(message)

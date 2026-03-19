@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.9.0",
+    [string]$Version = "1.9.1.0",
     [string]$PackageName = "GAWELA.Tourenplaner",
     [string]$Publisher = "CN=GAWELA",
     [string]$PublisherDisplayName = "GAWELA",

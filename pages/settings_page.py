@@ -9,6 +9,7 @@ import customtkinter as ctk
 
 from backup_manager import BackupManager
 from settings_manager import SettingsManager
+from services.sql_import_service import infer_database_name_from_data_dir
 
 
 class QuickAccessPicker(ctk.CTkFrame):
@@ -198,7 +199,7 @@ class SettingsPage(ctk.CTkFrame):
         self.settings_manager = SettingsManager(Path(getattr(self.app, "config_dir", getattr(self.app, "base_dir", "."))))
         self._backup_running = False
         self._appearance_buttons = {}
-        self._xml_info = None
+        self._sql_info = None
         self._theme_info = None
         self._quick_access_info = None
         self._quick_access_option_map = dict(self.app.get_quick_access_options()) if hasattr(self.app, "get_quick_access_options") else {}
@@ -323,7 +324,7 @@ class SettingsPage(ctk.CTkFrame):
             text_color=self.theme.TEXT,
         ).grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
 
-        self._xml_info = ctk.CTkLabel(
+        self._sql_info = ctk.CTkLabel(
             data_card,
             text="",
             font=self.font(12),
@@ -331,32 +332,32 @@ class SettingsPage(ctk.CTkFrame):
             justify="left",
             wraplength=900,
         )
-        self._xml_info.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="w")
+        self._sql_info.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="w")
 
-        xml_row = ctk.CTkFrame(data_card, fg_color="transparent")
-        xml_row.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="ew")
-        xml_row.grid_columnconfigure((0, 1), weight=1)
+        sql_row = ctk.CTkFrame(data_card, fg_color="transparent")
+        sql_row.grid(row=2, column=0, padx=16, pady=(0, 16), sticky="ew")
+        sql_row.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkButton(
-            xml_row,
-            text="XML-Ordner wählen",
+            sql_row,
+            text="SQL-Datenordner wählen",
             height=40,
             corner_radius=12,
             fg_color=self.theme.PANEL,
             hover_color=self.theme.BORDER,
             text_color=self.theme.TEXT,
-            command=self._select_xml_folder_and_refresh,
+            command=self._select_sql_data_dir_and_refresh,
         ).grid(row=0, column=0, padx=(0, 8), sticky="ew")
 
         ctk.CTkButton(
-            xml_row,
-            text="Ordner importieren",
+            sql_row,
+            text="SQL importieren",
             height=40,
             corner_radius=12,
             fg_color=self.theme.ACCENT,
             hover_color=self.theme.ACCENT_HOVER,
             text_color=("white", "white"),
-            command=self.app.import_xml_from_folder,
+            command=self.app.import_from_sql,
         ).grid(row=0, column=1, padx=(8, 0), sticky="ew")
 
         quick_card = ctk.CTkFrame(
@@ -586,7 +587,9 @@ class SettingsPage(ctk.CTkFrame):
         settings = self.settings_manager.load()
         settings.update(extra_updates or {})
         saved = self.settings_manager.save(settings)
-        self.app.xml_folder = saved.get("xml_folder") or None
+        self.app.sql_data_dir = saved.get("sql_data_dir") or self.app.sql_data_dir
+        self.app.sql_server_instance = saved.get("sql_server_instance") or self.app.sql_server_instance
+        self.app.sql_database = saved.get("sql_database") or self.app.sql_database
         self.app.appearance_preference = saved.get("appearance_mode") or "System"
         self.app.quick_access_items = self.app.normalize_quick_access_items(saved.get("quick_access_items", []))
         if hasattr(self.app, "refresh_quick_access_tools"):
@@ -616,17 +619,20 @@ class SettingsPage(ctk.CTkFrame):
         self.app.set_appearance_preference(saved.get("appearance_mode"), persist=False)
         self.refresh()
 
-    def _select_xml_folder_and_refresh(self):
-        folder = filedialog.askdirectory(title="Ordner mit XML-Dateien auswählen")
+    def _select_sql_data_dir_and_refresh(self):
+        folder = filedialog.askdirectory(title="SQL-Datenordner wählen")
         if not folder:
             return
-        self._save_settings({"xml_folder": folder})
-        try:
-            self.app._sync_seen_files()
-        except Exception:
-            pass
+        guessed_database = infer_database_name_from_data_dir(folder)
+        updates = {"sql_data_dir": folder}
+        if guessed_database:
+            updates["sql_database"] = guessed_database
+        self._save_settings(updates)
         self.refresh()
-        messagebox.showinfo("Ordner gespeichert", f"XML-Ordner:\n{folder}")
+        messagebox.showinfo(
+            "Ordner gespeichert",
+            f"SQL-Datenordner:\n{folder}\n\nDatenbank: {self.app.sql_database or 'nicht erkannt'}",
+        )
 
     def _select_backup_dir(self):
         folder = filedialog.askdirectory(title="Backup-Ordner auswählen")
@@ -1122,9 +1128,17 @@ class SettingsPage(ctk.CTkFrame):
             current_label = {"System": "System", "Light": "Hell", "Dark": "Dunkel"}.get(current, current)
             self._theme_info.configure(text=f"Aktuelle Darstellung: {current_label}")
 
-        if self._xml_info is not None:
-            folder = str(settings.get("xml_folder") or "").strip()
-            self._xml_info.configure(text=f"XML-Ordner: {folder}" if folder else "XML-Ordner: Noch nicht gesetzt")
+        if self._sql_info is not None:
+            data_dir = str(settings.get("sql_data_dir") or "").strip()
+            server = str(settings.get("sql_server_instance") or r".\SQLEXPRESS").strip()
+            database = str(settings.get("sql_database") or "").strip()
+            self._sql_info.configure(
+                text=(
+                    f"SQL-Instanz: {server}\n"
+                    f"Datenbank: {database or 'nicht erkannt'}\n"
+                    f"Datenordner: {data_dir or 'Noch nicht gesetzt'}"
+                )
+            )
 
         quick_access_items = self.app.normalize_quick_access_items(settings.get("quick_access_items", []))
         for variable, menu, item_id in zip(self._quick_access_vars, self._quick_access_menus, quick_access_items):
@@ -1147,7 +1161,7 @@ class SettingsPage(ctk.CTkFrame):
         if last_backup_iso:
             try:
                 parsed = datetime.fromisoformat(last_backup_iso.replace("Z", "+00:00"))
-                last_backup_text = parsed.astimezone().strftime("%d-%m-%Y %H:%M")
+                last_backup_text = parsed.astimezone().strftime("%d.%m.%Y %H:%M")
             except Exception:
                 last_backup_text = last_backup_iso
         self.last_backup_info.configure(text=last_backup_text)

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 # Release / Deployment Checklist
 # - MSIX signieren und das Zertifikat auf Zielsystemen vertrauen.
-# - `.msix` und `.appinstaller` ueber HTTPS hosten.
-# - In der `.appinstaller` Datei UpdateSettings fuer OnLaunch/AutomaticBackgroundTask setzen.
-# - Installation immer ueber die `.appinstaller` Datei testen, nicht nur ueber das nackte `.msix`.
+# - `.msix` und `.appinstaller` über HTTPS hosten.
+# - In der `.appinstaller` Datei UpdateSettings für OnLaunch/AutomaticBackgroundTask setzen.
+# - Installation immer über die `.appinstaller` Datei testen, nicht nur über das nackte `.msix`.
 # - Gruppenrichtlinien / App Installer Policies pruefen, falls `ms-appinstaller` deaktiviert ist.
 
 APP_NAME = "GAWELA Tourenplaner"

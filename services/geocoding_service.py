@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderServiceError, GeocoderTimedOut, GeocoderUnavailable
 
 from services.json_storage import InvalidJsonFileError, atomic_write_json, load_json_file
 
@@ -20,14 +21,41 @@ class GeocodingService:
         *,
         user_agent: str,
         timeout: int = 10,
-        fair_use_delay_seconds: float = 0.25,
+        fair_use_delay_seconds: float = 1.1,
+        retry_attempts: int = 3,
     ):
         self.cache_file = Path(cache_file)
-        self.fair_use_delay_seconds = max(0.0, float(fair_use_delay_seconds))
+        # Nominatim fair use: around max. 1 request per second.
+        self.fair_use_delay_seconds = max(1.0, float(fair_use_delay_seconds))
+        self.retry_attempts = max(1, int(retry_attempts))
         self._lock = threading.Lock()
         self._dirty = False
+        self._last_request_monotonic = 0.0
         self._cache = self._load_cache()
         self._geolocator = Nominatim(user_agent=user_agent, timeout=timeout)
+
+    def _sleep_for_rate_limit(self) -> None:
+        if not self.fair_use_delay_seconds:
+            return
+        now = time.monotonic()
+        wait_for = self.fair_use_delay_seconds - (now - self._last_request_monotonic)
+        if wait_for > 0:
+            time.sleep(wait_for)
+
+    def _geocode_with_retry(self, address: str):
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                self._sleep_for_rate_limit()
+                location = self._geolocator.geocode(address)
+                self._last_request_monotonic = time.monotonic()
+                return location
+            except (GeocoderTimedOut, GeocoderUnavailable, GeocoderServiceError):
+                self._last_request_monotonic = time.monotonic()
+                if attempt >= self.retry_attempts:
+                    raise
+                # Backoff for temporary limits/outages.
+                time.sleep(min(4.0, 0.8 * attempt))
+        return None
 
     def _load_cache(self) -> dict:
         try:
@@ -55,11 +83,7 @@ class GeocodingService:
                 return float(cached_value["lat"]), float(cached_value["lng"])
             except (TypeError, ValueError):
                 logger.warning("Ignoring malformed geocode cache entry for %s", key)
-
-        if self.fair_use_delay_seconds:
-            time.sleep(self.fair_use_delay_seconds)
-
-        location = self._geolocator.geocode(address)
+        location = self._geocode_with_retry(address)
         if not location:
             return None
 

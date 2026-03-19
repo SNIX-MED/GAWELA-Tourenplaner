@@ -36,7 +36,7 @@ def parse_date(value):
 def format_date(value) -> str:
     if value is None:
         return ""
-    return value.strftime("%d-%m-%Y")
+    return value.strftime("%d.%m.%Y")
 
 
 def normalize_date_string(value) -> str:

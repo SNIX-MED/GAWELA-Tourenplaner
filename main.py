@@ -11,12 +11,12 @@ import logging
 import calendar as pycalendar
 import queue
 import subprocess
+import re
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageTk, ImageDraw
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox, filedialog
-import xml.etree.ElementTree as ET
 from urllib.parse import quote
 from uuid import uuid4
 from pathlib import Path
@@ -45,7 +45,9 @@ from services.time_utils import format_time, parse_time, validate_time_window
 from services.geocoding_service import GeocodingService
 from services.json_storage import InvalidJsonFileError, atomic_write_json, load_json_file
 from services.map_route_service import RouteServiceError, fetch_route_path
+from services.route_optimization_service import optimize_stop_order
 from services.pin_storage import load_pins as load_pin_records, save_pins as save_pin_records
+from services.sql_import_service import DEFAULT_SQL_DATA_DIR, fetch_order_rows, infer_database_name_from_data_dir
 from backup_manager import BackupManager
 from config.update_config import APP_NAME, SHOW_UPDATE_PAGE_IN_MENU
 from pages.vehicles_page import VehiclesPage
@@ -708,7 +710,7 @@ def _display_date_string(value) -> str:
     parsed = parse_date(value)
     if not parsed:
         return ""
-    return parsed.strftime("%d-%m-%Y")
+    return parsed.strftime("%d.%m.%Y")
 
 
 def _date_for_calendar(year: int, month: int, day: int) -> str:
@@ -744,7 +746,217 @@ GERMAN_MONTH_NAMES = [
 SERVICE_MINUTE_OPTIONS = ["0", "5", "10", "15", "20", "30", "45", "60", "90", "120"]
 TIME_HOUR_OPTIONS = [f"{hour:02d}" for hour in range(24)]
 TIME_MINUTE_OPTIONS = [f"{minute:02d}" for minute in range(0, 60, 5)]
-DEFAULT_QUICK_ACCESS_ITEMS = ["action:export_route", "action:import_folder", "", ""]
+DEFAULT_QUICK_ACCESS_ITEMS = ["action:export_route", "action:import_sql", "", ""]
+DELIVERY_TYPE_OPTIONS = ["Frei Bordsteinkante", "Mit Verteilung", "mit Verteilung & montage"]
+DEFAULT_DELIVERY_TYPE = DELIVERY_TYPE_OPTIONS[0]
+_DELIVERY_TYPE_CANONICAL = {
+    "frei bordsteinkante": "Frei Bordsteinkante",
+    "mit verteilung": "Mit Verteilung",
+    "mit verteilung & montage": "mit Verteilung & montage",
+}
+_NON_MAP_DELIVERY_TYPE_CANONICAL = {
+    "selbstabholung": "Selbstabholung",
+    "post": "Post",
+    "fracht mit spediteur": "Fracht mit Spediteur",
+    "direktlieferung frei bordsteinkante": "Direktlieferung frei Bordsteinkante",
+    "direktlieferung ohne warenverteilung": "Direktlieferung ohne Warenverteilung",
+    "fracht-tresor-bordstein": "Fracht-Tresor-Bordstein",
+    "fracht-tresor-verwendung": "Fracht-Tresor-Verwendung",
+}
+_SQL_DELIVERY_CODE_TO_LABEL = {
+    "fracht_o_vert": "Frei Bordsteinkante",
+    "fracht_m_vert": "Mit Verteilung",
+    "fracht_m_vert_mont": "mit Verteilung & montage",
+    "selbstabholung": "Selbstabholung",
+    "post": "Post",
+    "fracht_mit_spediteur": "Fracht mit Spediteur",
+    "fracht-tresor-bordstein": "Direktlieferung frei Bordsteinkante",
+    "fracht-tresor-verwendung": "Direktlieferung ohne Warenverteilung",
+}
+_SQL_NON_MAP_DELIVERY_CODES = {
+    "selbstabholung",
+    "post",
+    "fracht_mit_spediteur",
+    "fracht-tresor-bordstein",
+    "fracht-tresor-verwendung",
+}
+NON_MAP_ORDER_FILTER_OPTIONS = [
+    "Post",
+    "Spediteur",
+    "Selbstabholung",
+    "Fracht-Tresor-Bordstein",
+    "Fracht-Tresor-Verwendung",
+]
+COUNTRY_HINT_BY_CODE = {
+    "CH": "Schweiz",
+    "DE": "Deutschland",
+    "AT": "Oesterreich",
+    "PL": "Polen",
+    "CZ": "Tschechien",
+    "ES": "Spanien",
+}
+PRODUCT_QTY_PREFIX_RE = re.compile(
+    r"^\s*(\d+)\s*(?:x|stk\.?|stueck|stück)?\s*[:\-]?\s*(.+)$",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_delivery_type(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_DELIVERY_TYPE
+    normalized = _DELIVERY_TYPE_CANONICAL.get(text.casefold())
+    if normalized:
+        return normalized
+    non_map = _NON_MAP_DELIVERY_TYPE_CANONICAL.get(text.casefold())
+    if non_map:
+        return non_map
+    return DEFAULT_DELIVERY_TYPE
+
+
+def _country_hint_from_code(code: str) -> str:
+    text = str(code or "").strip().upper()
+    if not text:
+        return "Schweiz"
+    return COUNTRY_HINT_BY_CODE.get(text, text)
+
+
+def _resolve_sql_delivery_handling(delivery_code: str) -> tuple[str, bool]:
+    code = str(delivery_code or "").strip().casefold()
+    if not code:
+        return DEFAULT_DELIVERY_TYPE, True
+    label = _SQL_DELIVERY_CODE_TO_LABEL.get(code, DEFAULT_DELIVERY_TYPE)
+    include_on_map = code not in _SQL_NON_MAP_DELIVERY_CODES
+    return label, include_on_map
+
+
+def _is_non_map_delivery_type(value) -> bool:
+    key = str(value or "").strip().casefold()
+    if not key:
+        return False
+    return key in _SQL_NON_MAP_DELIVERY_CODES or key in _NON_MAP_DELIVERY_TYPE_CANONICAL
+
+
+def _normalize_non_map_order_category(value) -> str:
+    key = str(value or "").strip().casefold()
+    if not key:
+        return ""
+    if "post" in key:
+        return "Post"
+    if "selbstabholung" in key:
+        return "Selbstabholung"
+    if "spediteur" in key or "fracht_mit_spediteur" in key:
+        return "Spediteur"
+    if "tresor-bordstein" in key or "direktlieferung frei bordsteinkante" in key:
+        return "Fracht-Tresor-Bordstein"
+    if "tresor-verwendung" in key or "direktlieferung ohne warenverteilung" in key:
+        return "Fracht-Tresor-Verwendung"
+    return ""
+
+
+def _first_non_empty_text(*values) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_order_and_delivery_addresses(data: dict | None) -> dict:
+    payload = dict(data or {})
+
+    delivery_name = _first_non_empty_text(payload.get("LieferadresseName"), payload.get("Name"))
+    delivery_street = _first_non_empty_text(payload.get("LieferadresseStrasse"), payload.get("Strasse"))
+    delivery_plz = _first_non_empty_text(payload.get("LieferadressePLZ"), payload.get("PLZ"))
+    delivery_ort = _first_non_empty_text(payload.get("LieferadresseOrt"), payload.get("Ort"))
+
+    order_name = _first_non_empty_text(
+        payload.get("AuftragsadresseName"),
+        payload.get("AuftragName"),
+    )
+    order_plz = _first_non_empty_text(
+        payload.get("AuftragsadressePLZ"),
+        payload.get("AuftragPLZ"),
+    )
+    order_ort = _first_non_empty_text(
+        payload.get("AuftragsadresseOrt"),
+        payload.get("AuftragOrt"),
+    )
+    if not (order_name or order_plz or order_ort):
+        order_name = delivery_name
+        order_plz = delivery_plz
+        order_ort = delivery_ort
+
+    payload["AuftragsadresseName"] = order_name
+    payload["AuftragsadressePLZ"] = order_plz
+    payload["AuftragsadresseOrt"] = order_ort
+
+    payload["LieferadresseName"] = delivery_name
+    payload["LieferadresseStrasse"] = delivery_street
+    payload["LieferadressePLZ"] = delivery_plz
+    payload["LieferadresseOrt"] = delivery_ort
+
+    # Compatibility fields used in existing UI and routing logic.
+    payload["Name"] = delivery_name
+    payload["Strasse"] = delivery_street
+    payload["PLZ"] = delivery_plz
+    payload["Ort"] = delivery_ort
+    return payload
+
+
+def _format_order_address(data: dict | None) -> str:
+    payload = _normalize_order_and_delivery_addresses(data)
+    name = str(payload.get("AuftragsadresseName") or "").strip()
+    city_line = " ".join(
+        value for value in [str(payload.get("AuftragsadressePLZ") or "").strip(), str(payload.get("AuftragsadresseOrt") or "").strip()] if value
+    ).strip()
+    if name and city_line:
+        return f"{name}, {city_line}"
+    return name or city_line
+
+
+def _format_delivery_address(data: dict | None) -> str:
+    payload = _normalize_order_and_delivery_addresses(data)
+    name = str(payload.get("LieferadresseName") or "").strip()
+    street = str(payload.get("LieferadresseStrasse") or "").strip()
+    city_line = " ".join(
+        value for value in [str(payload.get("LieferadressePLZ") or "").strip(), str(payload.get("LieferadresseOrt") or "").strip()] if value
+    ).strip()
+    line2 = ", ".join(value for value in [street, city_line] if value).strip()
+    if name and line2:
+        return f"{name}, {line2}"
+    return name or line2
+
+
+def _split_delivery_name_lines(name: str) -> list[str]:
+    text = str(name or "").strip()
+    if not text:
+        return []
+    for separator in (" / ", " | ", ";"):
+        if separator in text:
+            return [part.strip() for part in text.split(separator) if part.strip()]
+    if "," in text:
+        left, right = [part.strip() for part in text.split(",", 1)]
+        parts = [part for part in (left, right) if part]
+        if len(parts) >= 2:
+            return parts
+    return [text]
+
+
+def _format_delivery_address_multiline(data: dict | None) -> str:
+    payload = _normalize_order_and_delivery_addresses(data)
+    name = str(payload.get("LieferadresseName") or "").strip()
+    street = str(payload.get("LieferadresseStrasse") or "").strip()
+    city_line = " ".join(
+        value for value in [str(payload.get("LieferadressePLZ") or "").strip(), str(payload.get("LieferadresseOrt") or "").strip()] if value
+    ).strip()
+    lines = []
+    lines.extend(_split_delivery_name_lines(name))
+    if street:
+        lines.append(street)
+    if city_line:
+        lines.append(city_line)
+    return "\n".join(lines)
 
 
 def _set_text_input_value(widget, value: str):
@@ -1334,6 +1546,9 @@ class CalendarPage(ctk.CTkFrame):
         super().__init__(master, fg_color=Theme.BG)
         self.app = app
         self._selected_date = None
+        self._upcoming_cards_window = None
+        self._upcoming_last_card_width = 0
+        self._upcoming_min_height = 420
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -1348,6 +1563,7 @@ class CalendarPage(ctk.CTkFrame):
         shell.grid(row=0, column=0, padx=28, pady=28, sticky="nsew")
         shell.grid_columnconfigure(0, weight=1)
         shell.grid_rowconfigure(1, weight=1)
+        shell.grid_rowconfigure(2, weight=0)
 
         hero = ctk.CTkFrame(shell, fg_color="transparent")
         hero.grid(row=0, column=0, padx=30, pady=(28, 18), sticky="ew")
@@ -1440,6 +1656,63 @@ class CalendarPage(ctk.CTkFrame):
         )
         self.titles_label.grid(row=7, column=0, padx=18, pady=(0, 18), sticky="w")
 
+        upcoming_shell = ctk.CTkFrame(
+            shell,
+            corner_radius=16,
+            fg_color=Theme.PANEL_2,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        upcoming_shell.grid(row=2, column=0, padx=24, pady=(0, 24), sticky="ew")
+        upcoming_shell.grid_columnconfigure(0, weight=1)
+        upcoming_shell.grid_rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(
+            upcoming_shell,
+            text="Geplante Touren der nächsten 10 Tage",
+            font=_font(16, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, padx=16, pady=(14, 4), sticky="w")
+
+        ctk.CTkLabel(
+            upcoming_shell,
+            text="5 Tage gleichzeitig sichtbar. Mit Scrollbalken oder Mausrad horizontal weiterblättern.",
+            font=_font(12),
+            text_color=Theme.SUBTEXT,
+        ).grid(row=1, column=0, padx=16, pady=(0, 10), sticky="w")
+
+        self.upcoming_canvas = tk.Canvas(
+            upcoming_shell,
+            bg=Theme.resolve(Theme.PANEL_2),
+            highlightthickness=0,
+            bd=0,
+            height=self._upcoming_min_height,
+            xscrollincrement=16,
+        )
+        self.upcoming_canvas.grid(row=2, column=0, padx=(14, 14), pady=(0, 8), sticky="nsew")
+
+        self.upcoming_scrollbar = ctk.CTkScrollbar(
+            upcoming_shell,
+            orientation="horizontal",
+            command=self.upcoming_canvas.xview,
+            **_scrollbar_kwargs(),
+        )
+        self.upcoming_scrollbar.grid(row=3, column=0, padx=14, pady=(0, 12), sticky="ew")
+        self.upcoming_canvas.configure(xscrollcommand=self.upcoming_scrollbar.set)
+
+        self.upcoming_cards_frame = ctk.CTkFrame(self.upcoming_canvas, fg_color="transparent")
+        self._upcoming_cards_window = self.upcoming_canvas.create_window(
+            (0, 0),
+            window=self.upcoming_cards_frame,
+            anchor="nw",
+        )
+        self.upcoming_cards_frame.bind("<Configure>", self._on_upcoming_frame_configure)
+        self.upcoming_canvas.bind("<Configure>", self._on_upcoming_canvas_configure)
+
+        self._bind_horizontal_scroll_mousewheel(self.upcoming_canvas)
+        self._bind_horizontal_scroll_mousewheel(self.upcoming_cards_frame)
+        self._refresh_upcoming_tours()
+
     def _build_legend_row(self, master, row: int, color, text: str):
         row_frame = ctk.CTkFrame(master, fg_color="transparent")
         row_frame.grid(row=row, column=0, padx=18, pady=4, sticky="ew")
@@ -1498,11 +1771,237 @@ class CalendarPage(ctk.CTkFrame):
         self.app.set_active_date(date_key)
         self.app.show_page("tours")
 
+    def _bind_horizontal_scroll_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_upcoming_mousewheel, add="+")
+        widget.bind("<Shift-MouseWheel>", self._on_upcoming_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_upcoming_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_upcoming_mousewheel, add="+")
+
+    def _on_upcoming_mousewheel(self, event):
+        direction = 0
+        if getattr(event, "delta", 0):
+            direction = -1 if event.delta > 0 else 1
+        elif getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        if direction == 0:
+            return None
+        self.upcoming_canvas.xview_scroll(direction * 4, "units")
+        return "break"
+
+    def _on_upcoming_frame_configure(self, _event=None):
+        self.upcoming_canvas.configure(scrollregion=self.upcoming_canvas.bbox("all"))
+
+    def _on_upcoming_canvas_configure(self, event):
+        viewport_width = max(int(getattr(event, "width", 0) or 0), 0)
+        if viewport_width <= 0:
+            return
+        gap = 10
+        card_width = max(220, (viewport_width - (gap * 4)) // 5)
+        if card_width != self._upcoming_last_card_width:
+            self._upcoming_last_card_width = card_width
+            self._refresh_upcoming_tours()
+
+    def _resolve_stop_calendar_display(self, stop: dict) -> dict:
+        stop_name = str((stop or {}).get("name") or "").strip()
+        address = str((stop or {}).get("address") or "").strip()
+        product = ""
+        for key in ("product", "Produkt", "lieferart", "Lieferart"):
+            value = str((stop or {}).get(key) or "").strip()
+            if value:
+                product = value
+                break
+
+        weight_value = self.app._parse_weight((stop or {}).get("weight"))
+        marker = self.app._find_marker_for_stop(stop or {})
+        if marker is not None:
+            data = getattr(marker, "data", {}) or {}
+            marker_name = str(data.get("Name", "")).strip()
+            street = str(data.get("Strasse", "")).strip()
+            plz = str(data.get("PLZ", "")).strip()
+            city = str(data.get("Ort", "")).strip()
+            marker_address = ", ".join([part for part in [street, " ".join([plz, city]).strip()] if part]).strip()
+            if not stop_name:
+                stop_name = marker_name
+            if not address:
+                address = marker_address
+            if not product:
+                product = _normalize_delivery_type(data.get("Lieferart"))
+            if weight_value <= 0:
+                weight_value = self.app._parse_weight(data.get("Gewicht"))
+
+        if not stop_name and " / " in address:
+            maybe_name, maybe_address = [part.strip() for part in address.split(" / ", 1)]
+            if maybe_name and maybe_address:
+                stop_name = maybe_name
+                address = maybe_address
+
+        if not stop_name:
+            stop_name = "Unbekannt"
+        if not product:
+            product = "Nicht angegeben"
+        if not address:
+            address = "Adresse unbekannt"
+
+        return {
+            "name": stop_name,
+            "address": address,
+            "product": product,
+            "weight": self.app._format_weight(weight_value),
+        }
+
+    def _alphabetic_stop_prefix(self, index: int) -> str:
+        idx = max(0, int(index))
+        chars = []
+        while True:
+            idx, rem = divmod(idx, 26)
+            chars.append(chr(ord("A") + rem))
+            if idx == 0:
+                break
+            idx -= 1
+        return "".join(reversed(chars)) + ")"
+
+    def _refresh_upcoming_tours(self):
+        for child in self.upcoming_cards_frame.winfo_children():
+            child.destroy()
+
+        all_tours = self.app._load_tours()
+        today = datetime.now().date()
+        end_date = today + timedelta(days=9)
+
+        tours_by_date = {}
+        for tour in all_tours:
+            date_key = _normalize_date_string(tour.get("date"))
+            parsed = parse_date(date_key)
+            if not parsed:
+                continue
+            if parsed < today or parsed > end_date:
+                continue
+            tours_by_date.setdefault(date_key, []).append(tour)
+
+        canvas_width = max(int(self.upcoming_canvas.winfo_width() or 0), 0)
+        gap = 10
+        card_width = self._upcoming_last_card_width or max(220, (canvas_width - (gap * 4)) // 5 if canvas_width else 240)
+
+        self.upcoming_cards_frame.grid_rowconfigure(0, weight=1)
+        for i in range(10):
+            self.upcoming_cards_frame.grid_columnconfigure(i, weight=0, minsize=card_width)
+            current_day = today + timedelta(days=i)
+            date_key = format_date(current_day)
+            day_tours = tours_by_date.get(date_key, [])
+
+            card = ctk.CTkFrame(
+                self.upcoming_cards_frame,
+                corner_radius=12,
+                fg_color=Theme.PANEL,
+                border_width=1,
+                border_color=Theme.BORDER,
+                width=card_width,
+            )
+            card.grid(row=0, column=i, padx=(0, gap if i < 9 else 0), pady=4, sticky="nsew")
+            card.grid_columnconfigure(0, weight=1)
+
+            date_lbl = ctk.CTkLabel(
+                card,
+                text=current_day.strftime("%d.%m.%Y"),
+                font=_font(13, "bold"),
+                text_color=Theme.TEXT,
+                justify="left",
+            )
+            date_lbl.grid(row=0, column=0, padx=10, pady=(10, 2), sticky="w")
+            self._bind_horizontal_scroll_mousewheel(date_lbl)
+
+            count_lbl = ctk.CTkLabel(
+                card,
+                text=f"{len(day_tours)} geplante Tour(en)",
+                font=_font(12),
+                text_color=Theme.SUBTEXT,
+                justify="left",
+            )
+            count_lbl.grid(row=1, column=0, padx=10, pady=(0, 8), sticky="w")
+            self._bind_horizontal_scroll_mousewheel(count_lbl)
+
+            self._bind_horizontal_scroll_mousewheel(card)
+            content_row = 2
+            if not day_tours:
+                lbl = ctk.CTkLabel(
+                    card,
+                    text="Keine Tour geplant.",
+                    font=_font(12),
+                    text_color=Theme.SUBTEXT,
+                    wraplength=max(160, card_width - 22),
+                    justify="left",
+                )
+                lbl.grid(row=content_row, column=0, padx=10, pady=(2, 14), sticky="w")
+                self._bind_horizontal_scroll_mousewheel(lbl)
+                continue
+
+            for tour in day_tours:
+                stops = [stop for stop in (tour.get("stops", []) or []) if isinstance(stop, dict)]
+                tour_name = str(tour.get("name") or "").strip() or f"Tour {tour.get('id', '')}".strip()
+                tour_header = ctk.CTkLabel(
+                    card,
+                    text=tour_name,
+                    font=_font(12, "bold"),
+                    text_color=Theme.ACCENT,
+                    wraplength=max(160, card_width - 22),
+                    justify="left",
+                )
+                tour_header.grid(row=content_row, column=0, padx=10, pady=(0, 4), sticky="w")
+                self._bind_horizontal_scroll_mousewheel(tour_header)
+                content_row += 1
+
+                if not stops:
+                    empty_lbl = ctk.CTkLabel(
+                        card,
+                        text="Keine Stopps gespeichert.",
+                        font=_font(11),
+                        text_color=Theme.SUBTEXT,
+                        justify="left",
+                        wraplength=max(160, card_width - 22),
+                    )
+                    empty_lbl.grid(row=content_row, column=0, padx=10, pady=(0, 14), sticky="w")
+                    self._bind_horizontal_scroll_mousewheel(empty_lbl)
+                    content_row += 1
+                    continue
+
+                for stop_index, stop in enumerate(stops):
+                    stop_info = self._resolve_stop_calendar_display(stop)
+                    prefix = self._alphabetic_stop_prefix(stop_index)
+                    stop_lbl = ctk.CTkLabel(
+                        card,
+                        text=(
+                            f"{prefix} {stop_info['name']}\n"
+                            f"   {stop_info['address']}\n"
+                            f"   Produkt: {stop_info['product']}\n"
+                            f"   Gewicht: {stop_info['weight']}"
+                        ),
+                        font=_font(11),
+                        text_color=Theme.TEXT,
+                        justify="left",
+                        wraplength=max(160, card_width - 22),
+                    )
+                    is_last_stop = stop_index == len(stops) - 1
+                    bottom_pad = 14 if is_last_stop else 6
+                    stop_lbl.grid(row=content_row, column=0, padx=10, pady=(0, bottom_pad), sticky="w")
+                    self._bind_horizontal_scroll_mousewheel(stop_lbl)
+                    content_row += 1
+
+        self.upcoming_cards_frame.update_idletasks()
+        total_width = (card_width * 10) + (gap * 9)
+        self.upcoming_canvas.itemconfigure(self._upcoming_cards_window, width=total_width)
+        needed_height = max(self._upcoming_min_height, int(self.upcoming_cards_frame.winfo_reqheight()) + 12)
+        if int(self.upcoming_canvas.cget("height")) != needed_height:
+            self.upcoming_canvas.configure(height=needed_height)
+        self.upcoming_canvas.configure(scrollregion=self.upcoming_canvas.bbox("all"))
+
     def refresh_calendar(self):
         self.calendar.refresh()
         if self._selected_date:
             payload = self.app.get_calendar_payload_map().get(self._selected_date)
             self._update_selection_details(self._selected_date, payload)
+        self._refresh_upcoming_tours()
 
     def refresh(self):
         self.refresh_calendar()
@@ -1512,7 +2011,7 @@ class GPSPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=Theme.BG)
         self.app = app
-        self.status_text = tk.StringVar(value="Bereit fuer native WebView2.")
+        self.status_text = tk.StringVar(value="Bereit für native WebView2.")
         self.runtime_hint_text = tk.StringVar(value="")
         self.webview_host = None
 
@@ -1677,7 +2176,7 @@ class GPSPage(ctk.CTkFrame):
                 "Keine gebundene Fixed-Version-Runtime gefunden. Fallback auf System-WebView2."
             )
         if self.webview_host is None:
-            self._update_status("Bereit fuer eingebettete WebView2.")
+            self._update_status("Bereit für eingebettete WebView2.")
 
     def _reload_embedded_view(self):
         if self.webview_host is None:
@@ -1874,6 +2373,7 @@ class StartMenuPage(ctk.CTkFrame):
             ("map", "Karte"),
             ("gps", "GPS"),
             ("list", "Auftragsliste"),
+            ("nonmap", "Nicht-Karten-Aufträge"),
             ("tours", "Liefertouren"),
             ("employees", "Mitarbeiter"),
             ("vehicles", "Fahrzeuge"),
@@ -1949,6 +2449,32 @@ class MapPage(ctk.CTkFrame):
             command=app.search_location,
         ).grid(row=0, column=1, padx=(0, 10), pady=10)
 
+        status_filter = ctk.CTkButton(
+            topbar,
+            text=app._map_filter_button_text(),
+            height=36,
+            width=210,
+            corner_radius=12,
+            font=_font(13, "bold"),
+            fg_color=Theme.PANEL_2,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=app.open_map_filter_dialog,
+            anchor="w",
+        )
+        status_filter.grid(row=0, column=3, padx=(0, 14), pady=10, sticky="e")
+
+        ctk.CTkButton(
+            topbar,
+            text="Route exportieren",
+            height=36,
+            corner_radius=12,
+            font=_font(13, "bold"),
+            fg_color=Theme.SUCCESS,
+            hover_color=Theme.SUCCESS_HOVER,
+            command=app.export_route,
+        ).grid(row=0, column=4, padx=(0, 14), pady=10, sticky="e")
+
         # Main area
         body = ctk.CTkFrame(
             self,
@@ -1971,132 +2497,65 @@ class MapPage(ctk.CTkFrame):
         options.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         options.grid_columnconfigure(0, weight=1)
 
-        route_section = DropdownSection(options, "Routen Optionen")
-        route_section.grid(row=0, column=0, sticky="ew")
-
-        # Route buttons
-        ctk.CTkButton(
-            route_section.body,
-            text="Route exportieren",
-            height=36,
-            corner_radius=12,
-            font=_font(13, "bold"),
-            fg_color=Theme.SUCCESS,
-            hover_color=Theme.SUCCESS_HOVER,
-            command=app.export_route,
-        ).pack(fill="x", pady=6)
+        legend_section = DropdownSection(options, "Legende", default_open=True)
+        legend_section.grid(row=0, column=0, sticky="ew", pady=(0, 0))
+        legend_section.body.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6, 7, 8), weight=1)
 
         ctk.CTkLabel(
-            route_section.body,
-            text="Liefertour speichern",
+            legend_section.body,
+            text="Farben (Auftragsstatus)",
             text_color=Theme.SUBTEXT,
-            font=_font(13),
-        ).pack(anchor="w", pady=(10, 0))
+            font=_font(12, "bold"),
+        ).grid(row=0, column=0, columnspan=6, padx=8, pady=(6, 2), sticky="w")
 
-        tour_date_entry = ctk.CTkEntry(
-            route_section.body,
-            placeholder_text="Datum (DD-MM-YYYY)",
-            height=36,
-            corner_radius=12,
-        )
-        tour_date_entry.pack(fill="x", pady=6)
-
-        tour_name_entry = ctk.CTkEntry(
-            route_section.body,
-            placeholder_text="Name (optional)",
-            height=36,
-            corner_radius=12,
-        )
-        tour_name_entry.pack(fill="x", pady=6)
-
-        employee_row = ctk.CTkFrame(route_section.body, fg_color="transparent")
-        employee_row.pack(fill="x", pady=6)
-        employee_row.grid_columnconfigure(0, weight=1)
-
-        employee_info = ctk.CTkLabel(
-            employee_row,
-            text="Keine Mitarbeiter ausgewählt",
+        ctk.CTkLabel(
+            legend_section.body,
+            text="Formen (Lieferart)",
             text_color=Theme.SUBTEXT,
-            font=_font(12),
-            anchor="w",
-            justify="left",
-        )
-        employee_info.grid(row=0, column=0, sticky="ew")
+            font=_font(12, "bold"),
+        ).grid(row=0, column=6, columnspan=3, padx=8, pady=(6, 2), sticky="w")
 
-        ctk.CTkButton(
-            employee_row,
-            text="Mitarbeiter wählen",
-            height=32,
-            corner_radius=12,
-            fg_color=Theme.PANEL,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.open_employee_picker(
-                selected_ids=app.current_route_employee_ids,
-                on_apply=app.set_current_route_employee_ids,
-            ),
-        ).grid(row=0, column=1, padx=(8, 0), sticky="e")
+        legend_icons = []
+        status_legend_frame = ctk.CTkFrame(legend_section.body, fg_color="transparent")
+        status_legend_frame.grid(row=1, column=0, columnspan=6, padx=8, pady=(0, 6), sticky="ew")
+        status_legend_frame.grid_columnconfigure((0, 1, 2, 3, 4, 5), weight=1)
 
-        vehicle_row = ctk.CTkFrame(route_section.body, fg_color="transparent")
-        vehicle_row.pack(fill="x", pady=6)
-        vehicle_row.grid_columnconfigure(0, weight=1)
+        status_items = [
+            ("nicht festgelegt", app.status_colors.get("nicht festgelegt", "#575757")),
+            ("Bestellt", app.status_colors.get("Bestellt", "#5959FF")),
+            ("Auf dem Weg", app.status_colors.get("Auf dem Weg", "#D17E0D")),
+            ("Im Lager", app.status_colors.get("Im Lager", "#5CFF59")),
+            ("Bereits eingeplant", app.status_colors.get("Bereits eingeplant", "#94A3B8")),
+            ("Tourfarbe", app.tour_pin_color),
+        ]
+        status_columns = 6
+        for item_idx, (label_text, color) in enumerate(status_items):
+            icon = app._make_circle_icon(color, 16)
+            legend_icons.append(icon)
+            row = ctk.CTkFrame(status_legend_frame, fg_color="transparent")
+            row_idx = item_idx // status_columns
+            col_idx = item_idx % status_columns
+            row.grid(row=row_idx, column=col_idx, sticky="w", pady=1, padx=(0, 12))
+            ctk.CTkLabel(row, text="", image=icon).pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(row, text=label_text, font=_font(12), text_color=Theme.TEXT).pack(side="left")
 
-        vehicle_info = ctk.CTkLabel(
-            vehicle_row,
-            text="Kein Fahrzeug ausgewählt",
-            text_color=Theme.SUBTEXT,
-            font=_font(12),
-            anchor="w",
-            justify="left",
-        )
-        vehicle_info.grid(row=0, column=0, sticky="ew")
+        delivery_legend_frame = ctk.CTkFrame(legend_section.body, fg_color="transparent")
+        delivery_legend_frame.grid(row=1, column=6, columnspan=3, padx=8, pady=(0, 6), sticky="ew")
+        delivery_legend_frame.grid_columnconfigure((0, 1, 2), weight=1)
 
-        ctk.CTkButton(
-            vehicle_row,
-            text="Fahrzeug wählen",
-            height=32,
-            corner_radius=12,
-            fg_color=Theme.PANEL,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=lambda: app.open_route_resource_picker(
-                selected_vehicle_id=app.current_route_vehicle_id,
-                selected_trailer_id=app.current_route_trailer_id,
-                on_apply=app.set_current_route_resources,
-            ),
-        ).grid(row=0, column=1, padx=(8, 0), sticky="e")
+        delivery_columns = 3
+        for item_idx, delivery_type in enumerate(DELIVERY_TYPE_OPTIONS):
+            normalized = _normalize_delivery_type(delivery_type)
+            icon = app._make_delivery_icon(normalized, app.status_colors.get("Bestellt", "#5959FF"), 16)
+            legend_icons.append(icon)
+            row = ctk.CTkFrame(delivery_legend_frame, fg_color="transparent")
+            row_idx = item_idx // delivery_columns
+            col_idx = item_idx % delivery_columns
+            row.grid(row=row_idx, column=col_idx, sticky="w", pady=1, padx=(0, 12))
+            ctk.CTkLabel(row, text="", image=icon).pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(row, text=normalized, font=_font(12), text_color=Theme.TEXT).pack(side="left")
 
-        trailer_info = ctk.CTkLabel(
-            route_section.body,
-            text="Kein Anhänger",
-            text_color=Theme.SUBTEXT,
-            font=_font(12),
-            anchor="w",
-            justify="left",
-        )
-        trailer_info.pack(fill="x", pady=(0, 6))
-
-        ctk.CTkButton(
-            route_section.body,
-            text="Tour speichern",
-            height=36,
-            corner_radius=12,
-            font=_font(13, "bold"),
-            fg_color=Theme.ACCENT,
-            hover_color=Theme.ACCENT_HOVER,
-            command=lambda: app.save_current_tour(tour_date_entry.get(), tour_name_entry.get()),
-        ).pack(fill="x", pady=6)
-
-        ctk.CTkButton(
-            route_section.body,
-            text="Route löschen",
-            height=36,
-            corner_radius=12,
-            font=_font(13, "bold"),
-            fg_color=Theme.DANGER,
-            hover_color=Theme.DANGER_HOVER,
-            command=app.clear_route,
-        ).pack(fill="x", pady=6)
+        app.map_legend_icons = legend_icons
 
         # -------- ROUTE PANEL + MAP (resizable splitter) --------
         split_bg = Theme.resolve(Theme.BORDER)
@@ -2222,6 +2681,19 @@ class MapPage(ctk.CTkFrame):
             text_color=Theme.TEXT,
             command=lambda: app.apply_route_start_time(start_time_entry.get()),
         ).grid(row=0, column=2, pady=2, sticky="e")
+
+        ctk.CTkButton(
+            start_time_row,
+            text="Route optimieren",
+            width=150,
+            height=32,
+            corner_radius=12,
+            font=_font(12, "bold"),
+            fg_color=Theme.SUCCESS,
+            hover_color=Theme.SUCCESS_HOVER,
+            text_color=("white", "white"),
+            command=app.optimize_current_route_order,
+        ).grid(row=0, column=3, padx=(8, 0), pady=2, sticky="e")
 
         tv_shell = ctk.CTkFrame(route_panel, corner_radius=12, fg_color=Theme.PANEL)
         tv_shell.grid(row=2, column=0, padx=10, pady=(6, 6), sticky="nsew")
@@ -2365,13 +2837,38 @@ class MapPage(ctk.CTkFrame):
         )
         info_card.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
         info_card.grid_columnconfigure(0, weight=1)
+        info_card.grid_columnconfigure(1, weight=0)
+        info_card.grid_rowconfigure(1, weight=1)
         info_card.grid_forget()
 
         info_title = ctk.CTkLabel(info_card, text="Details", font=_font(16, "bold"), text_color=Theme.TEXT)
         info_title.grid(row=0, column=0, padx=14, pady=(14, 6), sticky="w")
 
-        info_label = ctk.CTkLabel(info_card, text="", text_color=Theme.TEXT, justify="left", font=_font(13))
-        info_label.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
+        info_label = tk.Text(
+            info_card,
+            wrap="word",
+            height=1,
+            font=_font(13),
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            bg=Theme.resolve(Theme.PANEL_2),
+            fg=Theme.resolve(Theme.TEXT),
+            insertbackground=Theme.resolve(Theme.TEXT),
+        )
+        info_label.tag_configure("bold", font=_font(13, "bold"))
+        info_scrollbar = ctk.CTkScrollbar(
+            info_card,
+            orientation="vertical",
+            command=info_label.yview,
+            **_scrollbar_kwargs(),
+        )
+        info_label.configure(yscrollcommand=info_scrollbar.set)
+        info_label.configure(state="disabled")
+        info_label.grid(row=1, column=0, padx=(14, 6), pady=(0, 10), sticky="nsew")
+        info_scrollbar.grid(row=1, column=1, padx=(0, 14), pady=(0, 10), sticky="ns")
 
         ctk.CTkButton(
             info_card,
@@ -2482,13 +2979,14 @@ class MapPage(ctk.CTkFrame):
         app.status_menu = status_menu
         app.btn_show_tour = btn_show_tour
         app.btn_remove_from_tour = btn_remove_from_tour
-        app.lbl_route_employee_summary = employee_info
-        app.lbl_route_vehicle_summary = vehicle_info
-        app.lbl_route_trailer_summary = trailer_info
+        app.lbl_route_employee_summary = None
+        app.lbl_route_vehicle_summary = None
+        app.lbl_route_trailer_summary = None
         app.btn_edit_current_tour = btn_edit_tour
         app.route_start_time_entry = start_time_entry
         app.route_segment_list = segment_list
         app.route_schedule_summary_label = schedule_summary
+        app.map_filter_button = status_filter
 
     def on_theme_changed(self):
         try:
@@ -2497,10 +2995,11 @@ class MapPage(ctk.CTkFrame):
             pass
 
 
-class XmlListPage(ctk.CTkFrame):
+class OrdersListPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color=Theme.BG)
         self.app = app
+        self._filter_job = None
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -2533,40 +3032,39 @@ class XmlListPage(ctk.CTkFrame):
 
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 6))
-        actions.grid_columnconfigure((0, 1, 2), weight=0)
+        actions.grid_columnconfigure((0, 1), weight=0)
 
         ctk.CTkButton(
             actions,
-            text="XML Einzelimport",
+            text="SQL-Datenordner wählen",
             height=36,
             corner_radius=12,
             fg_color=Theme.PANEL_2,
             hover_color=Theme.BORDER,
             text_color=Theme.TEXT,
-            command=self.app.import_xml_file,
+            command=self.app.select_sql_data_dir,
         ).grid(row=0, column=0, padx=(0, 8), pady=2, sticky="w")
 
-        ctk.CTkButton(
+        self.sql_import_button = ctk.CTkButton(
             actions,
-            text="XML-Ordner auswählen",
+            text="SQL importieren",
             height=36,
             corner_radius=12,
             fg_color=Theme.PANEL_2,
             hover_color=Theme.BORDER,
             text_color=Theme.TEXT,
-            command=self.app.select_xml_folder,
-        ).grid(row=0, column=1, padx=8, pady=2, sticky="w")
+            command=self.app.import_from_sql,
+        )
+        self.sql_import_button.grid(row=0, column=1, padx=(8, 0), pady=2, sticky="w")
 
-        ctk.CTkButton(
+        self.import_status_label = ctk.CTkLabel(
             actions,
-            text="Ordner importieren",
-            height=36,
-            corner_radius=12,
-            fg_color=Theme.PANEL_2,
-            hover_color=Theme.BORDER,
-            text_color=Theme.TEXT,
-            command=self.app.import_xml_from_folder,
-        ).grid(row=0, column=2, padx=(8, 0), pady=2, sticky="w")
+            text="Importstatus: Bereit",
+            anchor="w",
+            text_color=Theme.SUBTEXT,
+            font=_font(12),
+        )
+        self.import_status_label.grid(row=1, column=0, columnspan=2, padx=(0, 0), pady=(4, 0), sticky="w")
 
         self.search_var = tk.StringVar(value="")
         search_entry = ctk.CTkEntry(
@@ -2578,7 +3076,7 @@ class XmlListPage(ctk.CTkFrame):
             corner_radius=12,
         )
         search_entry.grid(row=0, column=1, padx=(10, 8), pady=10, sticky="e")
-        search_entry.bind("<KeyRelease>", lambda e: self.apply_filter())
+        search_entry.bind("<KeyRelease>", self._schedule_filter, add="+")
 
         ctk.CTkButton(
             topbar,
@@ -2608,19 +3106,21 @@ class XmlListPage(ctk.CTkFrame):
         self.columns = [
             "Auftragsnummer",
             "Bestelldatum",
-            "Name",
-            "Strasse",
-            "PLZ",
-            "Ort",
+            "Auftragsadresse",
+            "Lieferadresse",
             "Email",
             "Telefon",
             "Gewicht",
+            "Produkte",
             "Status",
         ]
         self.tree = ttk.Treeview(table_shell, columns=self.columns, show="headings")
         for col in self.columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=130, anchor="w", stretch=True)
+        self.tree.column("Auftragsadresse", width=260, anchor="w", stretch=True)
+        self.tree.column("Lieferadresse", width=280, anchor="w", stretch=True)
+        self.tree.column("Produkte", width=320, anchor="w", stretch=True)
 
         vsb = ctk.CTkScrollbar(table_shell, orientation="vertical", command=self.tree.yview, **_scrollbar_kwargs())
         hsb = ctk.CTkScrollbar(table_shell, orientation="horizontal", command=self.tree.xview, **_scrollbar_kwargs())
@@ -2633,17 +3133,51 @@ class XmlListPage(ctk.CTkFrame):
         self.tree.bind("<Double-1>", self.on_double_click)
 
         self._all_rows = []
+        self._order_to_marker = {}
+        self._row_to_entry = {}
+        self.update_import_status()
+
+    def _schedule_filter(self, _event=None):
+        if self._filter_job is not None:
+            try:
+                self.after_cancel(self._filter_job)
+            except Exception:
+                pass
+        self._filter_job = self.after(130, self.apply_filter)
 
     def refresh(self):
+        self.update_import_status()
         self._all_rows = []
+        self._order_to_marker = {}
+        self._row_to_entry = {}
         for m in getattr(self.app, "marker_list", []):
             if getattr(m, "is_system", False):
                 continue
             data = getattr(m, "data", {}) or {}
             if data:
-                d = dict(data)
+                d = _normalize_order_and_delivery_addresses(dict(data))
+                d["Bestelldatum"] = _display_date_string(d.get("Bestelldatum")) or str(d.get("Bestelldatum") or "")
                 d["Status"] = getattr(m, "status", d.get("Status", "nicht festgelegt"))
-                self._all_rows.append(d)
+                d["Auftragsadresse"] = _format_order_address(d)
+                d["Lieferadresse"] = _format_delivery_address(d)
+                auftrag = str(d.get("Auftragsnummer", "")).strip()
+                if auftrag:
+                    self._order_to_marker[auftrag] = m
+                search_text = " ".join(str(d.get(col, "")) for col in self.columns).lower()
+                identity = self.app._item_identity_key(d)
+                self._all_rows.append((d, search_text, {"type": "marker", "marker": m, "identity": identity}))
+        for pending in getattr(self.app, "pending_sql_orders", []):
+            if not isinstance(pending, dict):
+                continue
+            d = _normalize_order_and_delivery_addresses(dict(pending))
+            d["Bestelldatum"] = _display_date_string(d.get("Bestelldatum")) or str(d.get("Bestelldatum") or "")
+            d.setdefault("Status", "nicht festgelegt")
+            d.setdefault("Lieferart", DEFAULT_DELIVERY_TYPE)
+            d["Auftragsadresse"] = _format_order_address(d)
+            d["Lieferadresse"] = _format_delivery_address(d)
+            search_text = " ".join(str(d.get(col, "")) for col in self.columns).lower()
+            identity = self.app._item_identity_key(d)
+            self._all_rows.append((d, search_text, {"type": "pending", "marker": None, "identity": identity}))
         self.apply_filter()
 
     def clear_search(self):
@@ -2654,28 +3188,40 @@ class XmlListPage(ctk.CTkFrame):
         selection = self.tree.selection()
         item_id = selection[0] if selection else self.tree.focus()
         if not item_id:
-            return None, None
+            return None, None, None
+
+        entry = self._row_to_entry.get(item_id)
+        if isinstance(entry, dict):
+            marker = entry.get("marker")
+            if marker is not None:
+                auftrag = str(getattr(marker, "auftragsnummer", "")).strip()
+            else:
+                values = self.tree.item(item_id, "values")
+                auftrag = str(values[0]).strip() if values else ""
+            return marker, auftrag, entry
 
         values = self.tree.item(item_id, "values")
         if not values:
-            return None, None
+            return None, None, None
 
         auftrag = str(values[0]).strip()
         if not auftrag:
-            return None, None
+            return None, None, None
 
-        marker = None
-        for m in getattr(self.app, "marker_list", []):
-            if getattr(m, "is_system", False):
-                continue
-            if str(getattr(m, "auftragsnummer", "")).strip() == auftrag:
-                marker = m
-                break
-        return marker, auftrag
+        marker = self._order_to_marker.get(auftrag)
+        if marker is None:
+            for m in getattr(self.app, "marker_list", []):
+                if getattr(m, "is_system", False):
+                    continue
+                if str(getattr(m, "auftragsnummer", "")).strip() == auftrag:
+                    marker = m
+                    self._order_to_marker[auftrag] = m
+                    break
+        return marker, auftrag, {"type": "marker" if marker else "pending", "marker": marker, "identity": None}
 
     def delete_selected_order(self):
-        marker, auftrag = self._get_selected_marker()
-        if not marker:
+        marker, auftrag, entry = self._get_selected_marker()
+        if marker is None and not isinstance(entry, dict):
             messagebox.showwarning("Auftrag löschen", "Bitte zuerst einen Auftrag in der Liste auswählen.")
             return
 
@@ -2684,6 +3230,19 @@ class XmlListPage(ctk.CTkFrame):
             "Auftrag löschen",
             f"Soll der ausgewählte Auftrag wirklich gelöscht werden?\n\nAuftragsnummer: {label}",
         ):
+            return
+
+        if marker is None:
+            identity = entry.get("identity") if isinstance(entry, dict) else None
+            if identity is None:
+                messagebox.showwarning("Auftrag löschen", "Ausgewählter Pending-Auftrag konnte nicht aufgelöst werden.")
+                return
+            self.app.pending_sql_orders = [
+                item for item in self.app.pending_sql_orders
+                if self.app._item_identity_key(item) != identity
+            ]
+            self.app._save_pending_sql_orders()
+            self.refresh()
             return
 
         try:
@@ -2717,38 +3276,276 @@ class XmlListPage(ctk.CTkFrame):
         self.refresh()
 
     def apply_filter(self):
+        self._filter_job = None
         for item in self.tree.get_children():
             self.tree.delete(item)
 
         query = self.search_var.get().strip().lower()
+        if query:
+            rows = [(row, entry) for row, search_text, entry in self._all_rows if query in search_text]
+        else:
+            rows = [(row, entry) for row, _search_text, entry in self._all_rows]
 
-        def row_matches(d: dict) -> bool:
-            if not query:
-                return True
-            haystack = " ".join([str(d.get(k, "")) for k in self.columns]).lower()
-            return query in haystack
+        even_bg = getattr(self.app, "_tv_even_bg", "#ffffff")
+        odd_bg = getattr(self.app, "_tv_odd_bg", "#f6f6f6")
+        self.tree.tag_configure("evenrow", background=even_bg)
+        self.tree.tag_configure("oddrow", background=odd_bg)
+        self._row_to_entry = {}
 
-        rows = [d for d in self._all_rows if row_matches(d)]
+        for index, row_data in enumerate(rows):
+            d, entry = row_data
+            values = tuple(d.get(col, "") for col in self.columns)
+            tag = "evenrow" if index % 2 == 0 else "oddrow"
+            item_id = self.tree.insert("", "end", values=values, tags=(tag,))
+            self._row_to_entry[item_id] = entry
+
+        self.info.configure(text=f"Einträge: {len(rows)}")
+
+    def update_import_status(self):
+        status_text = str(self.app.get_sql_import_status_text() or "Bereit")
+        running = bool(self.app.is_sql_import_running())
+        started_at = getattr(self.app, "_sql_import_started_at", None)
+        if running and isinstance(started_at, datetime):
+            if (datetime.now() - started_at).total_seconds() > 60 * 60:
+                # Safety unlock for stale state after crashes.
+                self.app._set_sql_import_status("Bereit", running=False)
+                status_text = str(self.app.get_sql_import_status_text() or "Bereit")
+                running = bool(self.app.is_sql_import_running())
+        color = Theme.SUBTEXT
+        if status_text.lower().startswith("fehler"):
+            color = Theme.DANGER
+        elif running:
+            color = Theme.ACCENT
+        self.import_status_label.configure(text=f"Importstatus: {status_text}", text_color=color)
+        self.sql_import_button.configure(state="disabled" if running else "normal")
+
+    def on_double_click(self, event):
+        marker, _auftrag, _entry = self._get_selected_marker()
+        if not marker:
+            messagebox.showwarning(
+                "Kundenkartei",
+                "Dieser Auftrag ist importiert, aber noch nicht geocodiert (noch kein Pin auf der Karte).",
+            )
+            return
+
+            self.app.open_customer_editor(marker)
+
+
+class NonMapOrdersPage(ctk.CTkFrame):
+    def __init__(self, master, app):
+        super().__init__(master, fg_color=Theme.BG)
+        self.app = app
+        self._filter_job = None
+        self._all_rows = []
+        self.filter_vars = {
+            label: tk.BooleanVar(value=True) for label in NON_MAP_ORDER_FILTER_OPTIONS
+        }
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        topbar = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        topbar.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 12))
+        topbar.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(topbar, text="Nicht-Karten-Aufträge", font=_font(18, "bold"), text_color=Theme.TEXT).grid(
+            row=0, column=0, padx=16, pady=14, sticky="w"
+        )
+
+        ctk.CTkButton(
+            topbar,
+            text="Aktualisieren",
+            width=120,
+            height=36,
+            corner_radius=12,
+            fg_color=Theme.PANEL_2,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=self.refresh,
+        ).grid(row=0, column=2, padx=12, pady=10)
+
+        self.search_var = tk.StringVar(value="")
+        search_entry = ctk.CTkEntry(
+            topbar,
+            textvariable=self.search_var,
+            placeholder_text="Suchen (Auftragsnummer, Adresse, Produkte)...",
+            width=360,
+            height=36,
+            corner_radius=12,
+        )
+        search_entry.grid(row=0, column=1, padx=(10, 8), pady=10, sticky="e")
+        search_entry.bind("<KeyRelease>", self._schedule_filter, add="+")
+
+        filter_shell = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        filter_shell.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
+        filter_shell.grid_columnconfigure(0, weight=1)
+        filter_shell.grid_columnconfigure(1, weight=0)
+
+        categories = ctk.CTkFrame(filter_shell, fg_color="transparent")
+        categories.grid(row=0, column=0, padx=14, pady=12, sticky="w")
+
+        for idx, label in enumerate(NON_MAP_ORDER_FILTER_OPTIONS):
+            cb = ctk.CTkCheckBox(
+                categories,
+                text=label,
+                variable=self.filter_vars[label],
+                command=self.apply_filter,
+                checkbox_width=20,
+                checkbox_height=20,
+                corner_radius=6,
+                border_width=2,
+                font=_font(12, "bold"),
+                text_color=Theme.TEXT,
+                fg_color=Theme.ACCENT,
+                hover_color=Theme.ACCENT_HOVER,
+                border_color=Theme.BORDER,
+            )
+            cb.grid(row=0, column=idx, padx=(0, 12), pady=2, sticky="w")
+
+        action_buttons = ctk.CTkFrame(filter_shell, fg_color="transparent")
+        action_buttons.grid(row=0, column=1, padx=14, pady=12, sticky="e")
+
+        ctk.CTkButton(
+            action_buttons,
+            text="Alle",
+            width=80,
+            height=32,
+            corner_radius=10,
+            fg_color=Theme.PANEL_2,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=self._select_all_filters,
+        ).grid(row=0, column=0, padx=(0, 8), pady=2, sticky="ew")
+
+        ctk.CTkButton(
+            action_buttons,
+            text="Keine",
+            width=80,
+            height=32,
+            corner_radius=10,
+            fg_color=Theme.PANEL_2,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=self._clear_all_filters,
+        ).grid(row=0, column=1, padx=(0, 0), pady=2, sticky="ew")
+
+        self.info = ctk.CTkLabel(self, text="", anchor="w", text_color=Theme.SUBTEXT, font=_font(13))
+        self.info.grid(row=2, column=0, padx=24, pady=(0, 6), sticky="w")
+
+        table_shell = ctk.CTkFrame(
+            self,
+            corner_radius=18,
+            fg_color=Theme.PANEL,
+            border_width=1,
+            border_color=Theme.BORDER,
+        )
+        table_shell.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        table_shell.grid_columnconfigure(0, weight=1)
+        table_shell.grid_rowconfigure(0, weight=1)
+
+        self.columns = [
+            "Auftragsnummer",
+            "Bestelldatum",
+            "Lieferart",
+            "Auftragsadresse",
+            "Lieferadresse",
+            "Gewicht",
+            "Produkte",
+        ]
+        self.tree = ttk.Treeview(table_shell, columns=self.columns, show="headings")
+        for col in self.columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=140, anchor="w", stretch=True)
+        self.tree.column("Auftragsadresse", width=240, anchor="w", stretch=True)
+        self.tree.column("Lieferadresse", width=260, anchor="w", stretch=True)
+        self.tree.column("Produkte", width=420, anchor="w", stretch=True)
+
+        vsb = ctk.CTkScrollbar(table_shell, orientation="vertical", command=self.tree.yview, **_scrollbar_kwargs())
+        hsb = ctk.CTkScrollbar(table_shell, orientation="horizontal", command=self.tree.xview, **_scrollbar_kwargs())
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+        vsb.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
+        hsb.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
+
+    def _schedule_filter(self, _event=None):
+        if self._filter_job is not None:
+            try:
+                self.after_cancel(self._filter_job)
+            except Exception:
+                pass
+        self._filter_job = self.after(120, self.apply_filter)
+
+    def _select_all_filters(self):
+        for var in self.filter_vars.values():
+            var.set(True)
+        self.apply_filter()
+
+    def _clear_all_filters(self):
+        for var in self.filter_vars.values():
+            var.set(False)
+        self.apply_filter()
+
+    def refresh(self):
+        self._all_rows = []
+        for raw in getattr(self.app, "non_map_sql_orders", []):
+            if not isinstance(raw, dict):
+                continue
+            row = _normalize_order_and_delivery_addresses(dict(raw))
+            row["Bestelldatum"] = _display_date_string(row.get("Bestelldatum")) or str(row.get("Bestelldatum") or "")
+            category = _normalize_non_map_order_category(row.get("NichtKarteKategorie") or row.get("Lieferart"))
+            row["NichtKarteKategorie"] = category
+            row["Lieferart"] = category or str(row.get("Lieferart") or "")
+            row["Auftragsadresse"] = _format_order_address(row)
+            row["Lieferadresse"] = _format_delivery_address(row)
+            search_text = " ".join(str(row.get(col, "")) for col in self.columns).lower()
+            self._all_rows.append((row, search_text))
+        self.apply_filter()
+
+    def apply_filter(self):
+        self._filter_job = None
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        enabled_categories = {
+            label for label, var in self.filter_vars.items() if bool(var.get())
+        }
+        query = self.search_var.get().strip().lower()
+        if not enabled_categories:
+            self.info.configure(text="Einträge: 0")
+            return
+        rows = []
+        for row, search_text in self._all_rows:
+            category = str(row.get("NichtKarteKategorie") or "").strip()
+            if category not in enabled_categories:
+                continue
+            if query and query not in search_text:
+                continue
+            rows.append(row)
 
         even_bg = getattr(self.app, "_tv_even_bg", "#ffffff")
         odd_bg = getattr(self.app, "_tv_odd_bg", "#f6f6f6")
         self.tree.tag_configure("evenrow", background=even_bg)
         self.tree.tag_configure("oddrow", background=odd_bg)
 
-        for index, d in enumerate(rows):
-            values = tuple(d.get(col, "") for col in self.columns)
+        for index, row in enumerate(rows):
+            values = tuple(row.get(col, "") for col in self.columns)
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.tree.insert("", "end", values=values, tags=(tag,))
 
         self.info.configure(text=f"Einträge: {len(rows)}")
-
-    def on_double_click(self, event):
-        marker, _auftrag = self._get_selected_marker()
-        if not marker:
-            messagebox.showwarning("Kundenkartei", "Pin zu diesem Auftrag wurde nicht gefunden.")
-            return
-
-        self.app.open_customer_editor(marker)
 
 
 class ToursPage(ctk.CTkFrame):
@@ -2812,10 +3609,10 @@ class ToursPage(ctk.CTkFrame):
         fields.grid(row=1, column=0, columnspan=2, padx=14, pady=(0, 8), sticky="ew")
         fields.grid_columnconfigure((0, 1, 2), weight=1)
 
-        self.filter_start_entry = ctk.CTkEntry(fields, height=36, corner_radius=12, placeholder_text="Von (DD-MM-YYYY)")
+        self.filter_start_entry = ctk.CTkEntry(fields, height=36, corner_radius=12, placeholder_text="Von (DD.MM.YYYY)")
         self.filter_start_entry.grid(row=0, column=0, padx=(0, 8), pady=4, sticky="ew")
 
-        self.filter_end_entry = ctk.CTkEntry(fields, height=36, corner_radius=12, placeholder_text="Bis (DD-MM-YYYY)")
+        self.filter_end_entry = ctk.CTkEntry(fields, height=36, corner_radius=12, placeholder_text="Bis (DD.MM.YYYY)")
         self.filter_end_entry.grid(row=0, column=1, padx=8, pady=4, sticky="ew")
 
         ctk.CTkButton(
@@ -3054,7 +3851,15 @@ class ToursPage(ctk.CTkFrame):
             total_str = self.app._format_weight(total_w)
             vehicle_text = self.app.format_tour_vehicle_summary(t)
             employee_text = self.app.format_employee_summary(t.get("employee_ids", []))
-            values = (t.get("id", ""), t.get("date", ""), t.get("name", ""), vehicle_text, employee_text, str(len(stops)), total_str)
+            values = (
+                t.get("id", ""),
+                _display_date_string(t.get("date", "")),
+                t.get("name", ""),
+                vehicle_text,
+                employee_text,
+                str(len(stops)),
+                total_str,
+            )
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.tree.insert("", "end", values=values, tags=(tag,))
 
@@ -3077,11 +3882,19 @@ class ToursPage(ctk.CTkFrame):
         active_date = getattr(self.app, "active_date", None)
         if active_date:
             self._filter_loaded_from_active_date = True
-            self.filter_start_entry.delete(0, "end")
-            self.filter_start_entry.insert(0, active_date)
-            self.filter_end_entry.delete(0, "end")
-            self.filter_end_entry.insert(0, active_date)
+            self._set_filter_entries(active_date, active_date)
             self.refresh()
+
+    def _set_filter_entries(self, start_value: str = "", end_value: str = ""):
+        self.filter_start_entry.delete(0, "end")
+        self.filter_start_entry.insert(0, str(start_value or ""))
+        self.filter_end_entry.delete(0, "end")
+        self.filter_end_entry.insert(0, str(end_value or ""))
+
+    def _apply_filter_state_change(self):
+        self.app.clear_active_date()
+        self._filter_loaded_from_active_date = False
+        self.refresh()
 
     def _get_filtered_tours(self):
         tours = list(self._all_tours or [])
@@ -3101,53 +3914,32 @@ class ToursPage(ctk.CTkFrame):
         end_iso = _normalize_date_string(end_value)
 
         if start_value and not start_iso:
-            messagebox.showwarning("Datumsfilter", "Ungültiges Startdatum. Bitte DD-MM-YYYY verwenden.")
+            messagebox.showwarning("Datumsfilter", "Ungültiges Startdatum. Bitte DD.MM.YYYY verwenden.")
             return
         if end_value and not end_iso:
-            messagebox.showwarning("Datumsfilter", "Ungültiges Enddatum. Bitte DD-MM-YYYY verwenden.")
+            messagebox.showwarning("Datumsfilter", "Ungültiges Enddatum. Bitte DD.MM.YYYY verwenden.")
             return
 
-        if start_iso:
-            self.filter_start_entry.delete(0, "end")
-            self.filter_start_entry.insert(0, start_iso)
-        if end_iso:
-            self.filter_end_entry.delete(0, "end")
-            self.filter_end_entry.insert(0, end_iso)
-
-        self.app.clear_active_date()
-        self._filter_loaded_from_active_date = False
-        self.refresh()
+        self._set_filter_entries(start_iso or start_value, end_iso or end_value)
+        self._apply_filter_state_change()
 
     def set_filter_date(self, date_str):
         iso_date = _normalize_date_string(date_str)
         if not iso_date:
             return
-        self.filter_start_entry.delete(0, "end")
-        self.filter_start_entry.insert(0, iso_date)
-        self.filter_end_entry.delete(0, "end")
-        self.filter_end_entry.insert(0, iso_date)
-        self.app.clear_active_date()
-        self._filter_loaded_from_active_date = False
-        self.refresh()
+        self._set_filter_entries(iso_date, iso_date)
+        self._apply_filter_state_change()
 
     def set_filter_this_week(self):
         today = datetime.now().date()
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
-        self.filter_start_entry.delete(0, "end")
-        self.filter_start_entry.insert(0, format_date(start))
-        self.filter_end_entry.delete(0, "end")
-        self.filter_end_entry.insert(0, format_date(end))
-        self.app.clear_active_date()
-        self._filter_loaded_from_active_date = False
-        self.refresh()
+        self._set_filter_entries(format_date(start), format_date(end))
+        self._apply_filter_state_change()
 
     def reset_filters(self):
-        self.filter_start_entry.delete(0, "end")
-        self.filter_end_entry.delete(0, "end")
-        self.app.clear_active_date()
-        self._filter_loaded_from_active_date = False
-        self.refresh()
+        self._set_filter_entries("", "")
+        self._apply_filter_state_change()
 
     def _render_selected_tour_stops(self):
         tour = self._get_selected_tour()
@@ -3502,10 +4294,11 @@ class ModernApp(ctk.CTk):
         os.makedirs(self.logs_dir, exist_ok=True)
         self.pins_file = os.path.join(self.config_dir, "pins.json")
         self.config_file = os.path.join(self.config_dir, "settings.json")
-        self.xml_import_state_file = os.path.join(self.config_dir, "xml_import_state.json")
         self.tours_file = os.path.join(self.config_dir, "tours.json")
         self.employees_file = os.path.join(self.data_dir, "employees.json")
         self.vehicles_file = os.path.join(self.data_dir, "vehicles.json")
+        self.pending_orders_file = os.path.join(self.data_dir, "pending_sql_orders.json")
+        self.non_map_orders_file = os.path.join(self.data_dir, "non_map_sql_orders.json")
         self.settings_manager = SettingsManager(Path(self.config_dir))
         self.sidebar_icons_dir = _resolve_runtime_asset_path(self.base_dir, "assets", "sidebar_icons")
         self.app_logo_path = _resolve_runtime_asset_path(self.base_dir, "assets", "Applogo.png")
@@ -3526,11 +4319,18 @@ class ModernApp(ctk.CTk):
             self.geocode_cache_file,
             user_agent="gawela_tourenplaner_v1",
             timeout=10,
-            fair_use_delay_seconds=0.25,
+            fair_use_delay_seconds=1.1,
+            retry_attempts=3,
         )
         self._route_request_job = 0
         self._search_job = 0
         self._import_job = 0
+        self._pending_geocode_job = 0
+        self._sql_import_running = False
+        self._sql_import_status_text = "Bereit"
+        self._sql_import_started_at = None
+        self.pending_sql_orders = []
+        self.non_map_sql_orders = []
 
         self.base_address = "Konstanzerstrasse 14, 8274 Tägerwilen, Schweiz"
         self.base_latlng = None
@@ -3545,6 +4345,11 @@ class ModernApp(ctk.CTk):
             "Bestellt": "#5959FF",
             "nicht festgelegt": "#575757",
         }
+        self.map_filter_status_options = ["nicht festgelegt", "Bestellt", "Auf dem Weg", "Im Lager", "Bereits eingeplant"]
+        self.map_filter_selected_statuses = set(self.map_filter_status_options)
+        self.map_filter_delivery_type_options = list(DELIVERY_TYPE_OPTIONS)
+        self.map_filter_selected_delivery_types = set(self.map_filter_delivery_type_options)
+        self.map_filter_only_current_tour = False
         self.tour_pin_color = "#8E44AD"
 
         self.marker_icon_size = 18
@@ -3574,10 +4379,12 @@ class ModernApp(ctk.CTk):
 
         self.current_selected_marker = None
         self._selected_pin_tour = None
+        self._map_filter_dialog = None
+        self.map_filter_button = None
 
-        self.xml_folder = None
-        self._seen_xml_files = set()
-        self._xml_import_signatures = self._load_xml_import_signatures()
+        self.sql_data_dir = DEFAULT_SQL_DATA_DIR
+        self.sql_server_instance = r".\SQLEXPRESS"
+        self.sql_database = infer_database_name_from_data_dir(self.sql_data_dir)
 
         self._last_zoom = None
         self._zoom_watch_running = False
@@ -3596,10 +4403,20 @@ class ModernApp(ctk.CTk):
         self._tour_data_revision = 0
         self._calendar_payload_cache = {}
         self._calendar_payload_revision = -1
+        self._tour_usage_cache = {}
+        self._tour_usage_cache_revision = -1
+        self._depot_icon_cache = {}
+        self._is_window_resizing = False
+        self._last_window_size = None
+        self._resize_settle_job = None
+        self._pending_marker_size_job = None
         self._auto_backup_running = False
         self._route_drag_key = None
         self._route_drag_target = None
         self.quick_access_items = list(DEFAULT_QUICK_ACCESS_ITEMS)
+
+        self._load_pending_sql_orders()
+        self._load_non_map_sql_orders()
 
         # Layout: Sidebar + Content
         self.grid_columnconfigure(1, weight=1)
@@ -3609,7 +4426,7 @@ class ModernApp(ctk.CTk):
         self.sidebar = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.PANEL, border_width=0, width=self.sidebar_expanded_width)
         self.sidebar.grid(row=0, column=0, sticky="nsw")
         self.sidebar.grid_propagate(False)
-        self.sidebar.grid_rowconfigure(12, weight=1)
+        self.sidebar.grid_rowconfigure(13, weight=1)
 
         brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         brand.grid(row=0, column=0, padx=16, pady=(18, 10), sticky="ew")
@@ -3680,6 +4497,14 @@ class ModernApp(ctk.CTk):
         )
         self.nav_list.grid(row=5, column=0, padx=14, pady=8, sticky="ew")
 
+        self.nav_nonmap = NavButton(
+            self.sidebar,
+            "Nicht-Karten",
+            command=lambda: self.show_page("nonmap"),
+            compact_icon="⋯",
+        )
+        self.nav_nonmap.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
+
         self.nav_tours = NavButton(
             self.sidebar,
             "Liefertouren",
@@ -3687,7 +4512,7 @@ class ModernApp(ctk.CTk):
             compact_icon="↦",
             compact_image=self.sidebar_icons.get("Liefertouren"),
         )
-        self.nav_tours.grid(row=6, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_tours.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_employees = NavButton(
             self.sidebar,
@@ -3696,7 +4521,7 @@ class ModernApp(ctk.CTk):
             compact_icon="◉",
             compact_image=self.sidebar_icons.get("Mitarbeiter"),
         )
-        self.nav_employees.grid(row=7, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_employees.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_vehicles = NavButton(
             self.sidebar,
@@ -3705,7 +4530,7 @@ class ModernApp(ctk.CTk):
             compact_icon="▣",
             compact_image=self.sidebar_icons.get("Fahrzeuge"),
         )
-        self.nav_vehicles.grid(row=8, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_vehicles.grid(row=9, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_settings = NavButton(
             self.sidebar,
@@ -3714,7 +4539,7 @@ class ModernApp(ctk.CTk):
             compact_icon="⚙",
             compact_image=self.sidebar_icons.get("Einstellungen"),
         )
-        self.nav_settings.grid(row=9, column=0, padx=14, pady=8, sticky="ew")
+        self.nav_settings.grid(row=10, column=0, padx=14, pady=8, sticky="ew")
 
         self.nav_update = None
         if SHOW_UPDATE_PAGE_IN_MENU:
@@ -3724,7 +4549,7 @@ class ModernApp(ctk.CTk):
                 command=lambda: self.show_page("update"),
                 compact_icon="↻",
             )
-            self.nav_update.grid(row=10, column=0, padx=14, pady=8, sticky="ew")
+            self.nav_update.grid(row=11, column=0, padx=14, pady=8, sticky="ew")
 
         tools = ctk.CTkFrame(
             self.sidebar,
@@ -3733,7 +4558,7 @@ class ModernApp(ctk.CTk):
             border_width=1,
             border_color=Theme.BORDER,
         )
-        tools.grid(row=11, column=0, padx=14, pady=(10, 12), sticky="ew")
+        tools.grid(row=12, column=0, padx=14, pady=(10, 12), sticky="ew")
         tools.grid_columnconfigure(0, weight=1)
         self.sidebar_tools = tools
 
@@ -3748,7 +4573,7 @@ class ModernApp(ctk.CTk):
         self.refresh_quick_access_tools()
 
         self.sidebar_footer = ctk.CTkLabel(self.sidebar, text="© GAWELA", font=_font(12), text_color=Theme.SUBTEXT)
-        self.sidebar_footer.grid(row=13, column=0, padx=14, pady=(0, 14), sticky="w")
+        self.sidebar_footer.grid(row=14, column=0, padx=14, pady=(0, 14), sticky="w")
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.grid(row=0, column=1, sticky="nsew")
@@ -3760,24 +4585,27 @@ class ModernApp(ctk.CTk):
             "calendar": CalendarPage(self.container, self),
             "map": MapPage(self.container, self),
             "gps": GPSPage(self.container, self),
-            "list": XmlListPage(self.container, self),
+            "list": OrdersListPage(self.container, self),
+            "nonmap": NonMapOrdersPage(self.container, self),
             "tours": ToursPage(self.container, self),
             "employees": EmployeesPage(self.container, self),
             "vehicles": VehiclesPage(self.container, self, Theme, _font),
             "settings": SettingsPage(self.container, self, Theme, _font),
             "update": UpdatePage(self.container, self, Theme, _font),
         }
+        self._page_grid_kwargs = {"row": 0, "column": 0, "sticky": "nsew"}
         for page in self.pages.values():
-            page.grid(row=0, column=0, sticky="nsew")
+            page.grid(**self._page_grid_kwargs)
+            page.grid_remove()
 
         self.update_route_employee_summary()
         self.update_route_resource_summary()
         self._apply_treeview_style()
         self.load_config()
         self.load_pins()
-        self.import_xml_from_folder(silent=True)
-        self.start_folder_watch()
+        self.import_from_sql(silent=True)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Configure>", self._on_window_configure, add="+")
         self.show_page("menu")
         self.refresh_update_runtime_context()
         self.start_zoom_watch()
@@ -3795,6 +4623,30 @@ class ModernApp(ctk.CTk):
                 self.iconbitmap(self.app_icon_path)
             except Exception:
                 logger.exception("ICO app icon could not be applied.")
+
+    def _on_window_configure(self, event=None):
+        if event is None or getattr(event, "widget", None) is not self:
+            return
+        try:
+            size = (int(event.width), int(event.height))
+        except Exception:
+            return
+        if self._last_window_size == size:
+            return
+        self._last_window_size = size
+        self._is_window_resizing = True
+        if self._resize_settle_job is not None:
+            try:
+                self.after_cancel(self._resize_settle_job)
+            except Exception:
+                pass
+        self._resize_settle_job = self.after(220, self._on_window_resize_settled)
+
+    def _on_window_resize_settled(self):
+        self._resize_settle_job = None
+        self._is_window_resizing = False
+        if getattr(self, "current_page", "") == "map" and self._last_zoom is not None:
+            self._schedule_marker_size_update(self._last_zoom, delay_ms=120)
 
     def _get_gps_helper_command(self) -> list[str]:
         if getattr(sys, "frozen", False):
@@ -3866,7 +4718,7 @@ class ModernApp(ctk.CTk):
         helper_runtime = helper_command[0] if helper_command else "Nicht gefunden"
         if self._is_gps_webview_running():
             return f"Native WebView2 aktiv. {runtime_hint} Helper: {helper_runtime}"
-        return f"Bereit fuer native WebView2. {runtime_hint} Helper: {helper_runtime}"
+        return f"Bereit für native WebView2. {runtime_hint} Helper: {helper_runtime}"
 
     def terminate_gps_native_window(self, *, timeout: float = 5.0) -> bool:
         process = getattr(self, "_gps_webview_process", None)
@@ -3947,6 +4799,7 @@ class ModernApp(ctk.CTk):
         self.nav_map.set_selected(key == "map")
         self.nav_gps.set_selected(key == "gps")
         self.nav_list.set_selected(key == "list")
+        self.nav_nonmap.set_selected(key == "nonmap")
         self.nav_tours.set_selected(key == "tours")
         self.nav_employees.set_selected(key == "employees")
         self.nav_vehicles.set_selected(key == "vehicles")
@@ -3980,6 +4833,7 @@ class ModernApp(ctk.CTk):
             self.nav_map,
             self.nav_gps,
             self.nav_list,
+            self.nav_nonmap,
             self.nav_tours,
             self.nav_employees,
             self.nav_vehicles,
@@ -4045,13 +4899,14 @@ class ModernApp(ctk.CTk):
         return [
             ("", "Kein Eintrag"),
             ("action:export_route", "Route exportieren"),
-            ("action:import_folder", "Ordner importieren"),
-            ("action:select_xml", "XML-Ordner wählen"),
+            ("action:import_sql", "SQL importieren"),
+            ("action:select_sql_dir", "SQL-Datenordner wählen"),
             ("page:menu", "Start"),
             ("page:calendar", "Kalender"),
             ("page:map", "Karte"),
             ("page:gps", "GPS"),
             ("page:list", "Auftragsliste"),
+            ("page:nonmap", "Nicht-Karten-Aufträge"),
             ("page:tours", "Liefertouren"),
             ("page:employees", "Mitarbeiter"),
             ("page:vehicles", "Fahrzeuge"),
@@ -4062,10 +4917,14 @@ class ModernApp(ctk.CTk):
         return {key: label for key, label in self.get_quick_access_options()}
 
     def normalize_quick_access_items(self, items) -> list[str]:
+        legacy_map = {
+            "action:import_folder": "action:import_sql",
+            "action:select_xml": "action:select_sql_dir",
+        }
         valid_ids = {key for key, _label in self.get_quick_access_options()}
         normalized = []
         for value in items if isinstance(items, list) else []:
-            key = str(value or "").strip()
+            key = legacy_map.get(str(value or "").strip(), str(value or "").strip())
             if key not in valid_ids:
                 key = ""
             if key and key in normalized:
@@ -4106,21 +4965,21 @@ class ModernApp(ctk.CTk):
             "corner_radius": 12,
             "font": _font(13, "bold"),
         }
-        if item_id == "action:select_xml":
+        if item_id == "action:select_sql_dir":
             config.update(
-                text="XML-Ordner wählen",
+                text="SQL-Datenordner wählen",
                 fg_color=Theme.PANEL,
                 hover_color=Theme.BORDER,
                 text_color=Theme.TEXT,
-                command=self.select_xml_folder,
+                command=self.select_sql_data_dir,
             )
-        elif item_id == "action:import_folder":
+        elif item_id == "action:import_sql":
             config.update(
-                text="Ordner importieren",
+                text="SQL importieren",
                 fg_color=Theme.PANEL,
                 hover_color=Theme.BORDER,
                 text_color=Theme.TEXT,
-                command=self.import_xml_from_folder,
+                command=self.import_from_sql,
             )
         elif item_id == "action:export_route":
             config.update(
@@ -4165,11 +5024,21 @@ class ModernApp(ctk.CTk):
                 previous_page.on_hide()
             except Exception:
                 pass
+        if previous_page is not None and previous_page is not page:
+            try:
+                previous_page.grid_remove()
+            except Exception:
+                pass
+        try:
+            if str(page.winfo_manager()) != "grid":
+                page.grid(**self._page_grid_kwargs)
+        except Exception:
+            page.grid(**self._page_grid_kwargs)
         self._set_sidebar_visible(name != "menu")
         self.current_page = name
         page.tkraise()
         self._set_nav_selected(name)
-        if name in ("menu", "calendar", "gps", "list", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
+        if name in ("menu", "calendar", "gps", "list", "nonmap", "tours", "employees", "vehicles", "settings", "update") and hasattr(page, "refresh"):
             page.refresh()
         if hasattr(page, "on_show"):
             try:
@@ -4787,15 +5656,68 @@ class ModernApp(ctk.CTk):
             pass
         marker.set_text("")
 
+    def _alpha_label_for_index(self, index: int) -> str:
+        number = int(index or 0)
+        if number <= 0:
+            return ""
+        letters = []
+        while number > 0:
+            number, remainder = divmod(number - 1, 26)
+            letters.append(chr(ord("A") + remainder))
+        return "".join(reversed(letters))
+
+    def _apply_route_marker_labels(self):
+        labels_by_marker = {}
+        if self.current_tour_id:
+            regular_markers = [m for m in getattr(self, "route_markers", []) if m and not self._is_depot_marker(m)]
+            for index, marker in enumerate(regular_markers, start=1):
+                labels_by_marker[id(marker)] = self._alpha_label_for_index(index)
+
+        for marker in getattr(self, "marker_list", []):
+            if marker is None:
+                continue
+            try:
+                marker.set_text(labels_by_marker.get(id(marker), ""))
+            except Exception:
+                pass
+
+    def _format_products_block(self, products: str) -> str:
+        product_items = [part.strip() for part in str(products or "").split(";") if str(part or "").strip()]
+        if not product_items:
+            return ""
+        product_lines = []
+        for item in product_items:
+            text = str(item or "").strip()
+            quantity = "1"
+            match = PRODUCT_QTY_PREFIX_RE.match(text)
+            if match:
+                quantity = str(match.group(1) or "1")
+                text = str(match.group(2) or "").strip() or text
+            product_lines.append(f"{quantity}x {text}")
+        return "\nProdukte:\n" + "\n".join(product_lines) + "\n\n"
+
     def _build_popup_text(self, d: dict) -> str:
+        payload = _normalize_order_and_delivery_addresses(d)
         notes = (d.get("Notizen", "") or "").strip()
+        products_line = self._format_products_block(d.get("Produkte", ""))
         notes_line = f"\n\nNotizen:\n{notes}" if notes else ""
+        order_address = _format_order_address(payload) or "Nicht hinterlegt"
+        delivery_address = _format_delivery_address_multiline(payload) or "Nicht hinterlegt"
+        total_product_weight = str(d.get("Gewicht", "")).strip() or "N/A"
+        order_weight = str(d.get("Auftragsgewicht", "")).strip()
+        order_weight_line = ""
+        if order_weight and order_weight != total_product_weight:
+            order_weight_line = f"Auftragsgewicht: {order_weight}\n"
         return (
-            f"{d.get('Name', '')}\n"
-            f"Adresse: {d.get('Strasse', '')}, {d.get('PLZ', '')} {d.get('Ort', '')}\n\n"
+            f"Auftragsadresse: {order_address}\n"
+            f"\n"
+            f"Lieferadresse:\n{delivery_address}\n\n"
             f"Auftragsnummer: {d.get('Auftragsnummer', '')}\n"
             f"Bestelldatum: {d.get('Bestelldatum', '')}\n"
-            f"Gewicht: {d.get('Gewicht', '')}\n"
+            f"Gesamtgewicht Produkte: {total_product_weight}\n"
+            f"{order_weight_line}"
+            f"{products_line}"
+            f"Lieferart: {_normalize_delivery_type(d.get('Lieferart', DEFAULT_DELIVERY_TYPE))}\n"
             f"Status: {d.get('Status', 'nicht festgelegt')}\n\n"
             f"Email: {d.get('Email', '')}\n"
             f"Telefon: {d.get('Telefon', '')}"
@@ -4806,6 +5728,9 @@ class ModernApp(ctk.CTk):
         anchor = getattr(marker, "route_anchor_id", None)
         if anchor:
             return ("anchor", str(anchor))
+        import_id = str(getattr(marker, "import_id", "")).strip()
+        if import_id:
+            return ("import", import_id)
         auftrag = str(getattr(marker, "auftragsnummer", "")).strip()
         if auftrag and auftrag.upper() != "N/A":
             return ("auftrag", auftrag)
@@ -4814,6 +5739,72 @@ class ModernApp(ctk.CTk):
             return ("coord", round(float(lat), 7), round(float(lng), 7))
         except Exception:
             return ("unknown",)
+
+    def _item_identity_key(self, item: dict | None):
+        data = item if isinstance(item, dict) else {}
+        import_id = str(data.get("ImportID") or "").strip()
+        if import_id:
+            return ("import", import_id)
+        order_number = str(data.get("Auftragsnummer") or "").strip()
+        if order_number:
+            return ("auftrag", order_number)
+        return None
+
+    def _collect_non_system_markers_by_identity(self) -> tuple[dict, list]:
+        marker_by_identity = {}
+        markers_without_identity = []
+        for marker in list(self.marker_list):
+            if getattr(marker, "is_system", False):
+                continue
+            marker_data = dict(getattr(marker, "data", {}) or {})
+            identity_key = self._item_identity_key(marker_data)
+            if identity_key is None:
+                markers_without_identity.append(marker)
+                continue
+            marker_by_identity[identity_key] = marker
+        return marker_by_identity, markers_without_identity
+
+    def _apply_payload_to_existing_marker(self, marker, item: dict):
+        item = _normalize_order_and_delivery_addresses(item)
+        try:
+            marker.set_position(float(item["lat"]), float(item["lng"]))
+        except Exception:
+            pass
+        marker.data = dict(item)
+        marker.status = str(item.get("Status") or "nicht festgelegt")
+        marker.email = str(item.get("Email") or "")
+        marker.auftragsnummer = str(item.get("Auftragsnummer") or "").strip()
+        marker.import_id = str(item.get("ImportID") or "").strip()
+        marker.full_info = self._build_popup_text(marker.data)
+
+    def _delete_marker_safely(self, marker, *, remove_from_list: bool = True):
+        try:
+            marker.delete()
+        except Exception:
+            pass
+        if not remove_from_list:
+            return
+        try:
+            self.marker_list.remove(marker)
+        except ValueError:
+            pass
+
+    def _warn_sql_cache_save_error(self, cache_error: str | None):
+        if cache_error:
+            messagebox.showwarning("Import", f"Geocode-Cache konnte nicht gespeichert werden:\n{cache_error}")
+
+    def _refresh_after_sql_marker_changes(self, has_changes: bool, *, show_map: bool):
+        if has_changes:
+            self.save_pins()
+            self._refresh_all_markers()
+            if show_map:
+                self.show_page("map")
+        self._refresh_pages("list", "nonmap", visible_only=False)
+
+    def _fail_sql_import(self, error: Exception | str, *, message: str):
+        error_text = str(error)
+        self._set_sql_import_status(f"Fehler: {error_text}", running=False)
+        messagebox.showerror("Fehler", f"{message}:\n{error_text}")
 
     # ---------- Route Panel ----------
     def refresh_route_panel(self):
@@ -5238,26 +6229,39 @@ class ModernApp(ctk.CTk):
                 return
 
     # ---------- Tours helper ----------
-    def _pin_used_in_any_tour_by_key(self, key):
-        tours = self._load_tours()
-        for t in tours:
-            for s in t.get("stops", []):
-                if not isinstance(s, dict):
+    def _build_tour_usage_cache(self) -> dict:
+        if self._tour_usage_cache_revision == self._tour_data_revision and isinstance(self._tour_usage_cache, dict):
+            return self._tour_usage_cache
+
+        usage = {}
+        for tour in self._load_tours():
+            for stop in tour.get("stops", []):
+                if not isinstance(stop, dict):
                     continue
-                if key[0] == "auftrag":
-                    if str(s.get("auftragsnummer", "")).strip() == key[1]:
-                        return t
-                elif key[0] == "coord":
-                    lat = s.get("lat")
-                    lng = s.get("lng")
-                    if lat is None or lng is None:
-                        continue
-                    try:
-                        if round(float(lat), 7) == key[1] and round(float(lng), 7) == key[2]:
-                            return t
-                    except Exception:
-                        pass
-        return None
+                stop_key = None
+                auftrag = str(stop.get("auftragsnummer", "")).strip()
+                if auftrag and auftrag.upper() != "N/A":
+                    stop_key = ("auftrag", auftrag)
+                else:
+                    lat = stop.get("lat")
+                    lng = stop.get("lng")
+                    if lat is not None and lng is not None:
+                        try:
+                            stop_key = ("coord", round(float(lat), 7), round(float(lng), 7))
+                        except Exception:
+                            stop_key = None
+                if stop_key is not None and stop_key not in usage:
+                    usage[stop_key] = tour
+
+        self._tour_usage_cache = usage
+        self._tour_usage_cache_revision = self._tour_data_revision
+        return usage
+
+    def _pin_used_in_any_tour_by_key(self, key):
+        if not isinstance(key, tuple) or not key:
+            return None
+        usage = self._build_tour_usage_cache()
+        return usage.get(key)
 
     def show_toast(self, text: str, duration_ms: int = 2200):
         try:
@@ -5337,17 +6341,71 @@ class ModernApp(ctk.CTk):
         draw.ellipse((pad, pad, size - pad - 1, size - pad - 1), fill=hex_color, outline="#222222")
         return ImageTk.PhotoImage(img)
 
+    def _make_square_icon(self, hex_color: str, size: int) -> ImageTk.PhotoImage:
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        pad = 2
+        draw.rectangle((pad, pad, size - pad - 1, size - pad - 1), fill=hex_color, outline="#222222")
+        return ImageTk.PhotoImage(img)
+
+    def _make_triangle_icon(self, hex_color: str, size: int) -> ImageTk.PhotoImage:
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        pad = 1
+        points = [
+            (size // 2, pad),
+            (size - pad - 1, size - pad - 1),
+            (pad, size - pad - 1),
+        ]
+        draw.polygon(points, fill=hex_color, outline="#222222")
+        return ImageTk.PhotoImage(img)
+
+    def _delivery_shape(self, delivery_type: str) -> str:
+        normalized = _normalize_delivery_type(delivery_type)
+        if normalized == "Mit Verteilung":
+            return "square"
+        if normalized == "mit Verteilung & montage":
+            return "triangle"
+        return "circle"
+
+    def _make_delivery_icon(self, delivery_type: str, hex_color: str, size: int) -> ImageTk.PhotoImage:
+        shape = self._delivery_shape(delivery_type)
+        if shape == "square":
+            return self._make_square_icon(hex_color, size)
+        if shape == "triangle":
+            return self._make_triangle_icon(hex_color, size)
+        return self._make_circle_icon(hex_color, size)
+
     def _build_marker_icons(self, size: int) -> dict:
         icons = {}
-        for status, color in self.status_colors.items():
-            icons[status] = self._make_circle_icon(color, size)
-        icons["tour"] = self._make_circle_icon(self.tour_pin_color, size)
+        for delivery_type in DELIVERY_TYPE_OPTIONS:
+            normalized = _normalize_delivery_type(delivery_type)
+            for status, color in self.status_colors.items():
+                icons[(normalized, status)] = self._make_delivery_icon(normalized, color, size)
+            icons[(normalized, "tour")] = self._make_delivery_icon(normalized, self.tour_pin_color, size)
         return icons
 
-    def _get_marker_icon(self, status: str, in_tour: bool) -> ImageTk.PhotoImage:
-        if in_tour and "tour" in self.marker_icons:
-            return self.marker_icons["tour"]
-        return self.marker_icons.get(status, self.marker_icons["nicht festgelegt"])
+    def _get_marker_icon(self, status: str, in_tour: bool, delivery_type: str = DEFAULT_DELIVERY_TYPE) -> ImageTk.PhotoImage:
+        normalized_delivery_type = _normalize_delivery_type(delivery_type)
+        status_key = "tour" if in_tour else str(status or "").strip()
+        icon = self.marker_icons.get((normalized_delivery_type, status_key))
+        if icon is not None:
+            return icon
+        fallback = self.marker_icons.get((normalized_delivery_type, "nicht festgelegt"))
+        if fallback is not None:
+            return fallback
+        # Ultimate fallback should always exist for default delivery type.
+        return self.marker_icons[(DEFAULT_DELIVERY_TYPE, "nicht festgelegt")]
+
+    def _get_depot_marker_icon(self, anchor_id: str) -> ImageTk.PhotoImage:
+        cache_key = (str(anchor_id), int(self.marker_icon_size))
+        cached = self._depot_icon_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        color = "#10B981" if str(anchor_id) == "depot_start" else "#EF4444"
+        icon = self._make_circle_icon(color, self.marker_icon_size)
+        self._depot_icon_cache[cache_key] = icon
+        return icon
 
     # ---------- Depot / Systemmarker ----------
     def _is_depot_marker(self, marker) -> bool:
@@ -5431,13 +6489,20 @@ class ModernApp(ctk.CTk):
 
     # ---------- Marker creation ----------
     def _create_marker(self, lat, lng, data: dict, status: str):
+        if isinstance(data, dict):
+            data = _normalize_order_and_delivery_addresses(data)
+            data["Lieferart"] = _normalize_delivery_type(data.get("Lieferart"))
+            if _is_non_map_delivery_type(data.get("Lieferart")):
+                return None
+
         dummy_marker = type("Dummy", (), {})()
         dummy_marker.data = data
         dummy_marker.auftragsnummer = data.get("Auftragsnummer", "")
         dummy_marker.position = (lat, lng)
         in_tour = self._pin_used_in_any_tour(dummy_marker) is not None
+        delivery_type = _normalize_delivery_type(data.get("Lieferart"))
 
-        icon = self._get_marker_icon(status, in_tour)
+        icon = self._get_marker_icon(status, in_tour, delivery_type=delivery_type)
         m = self.map_widget.set_marker(lat, lng, text="", icon=icon, command=self.on_marker_click)
 
         m.data = data
@@ -5445,6 +6510,7 @@ class ModernApp(ctk.CTk):
         m.full_info = self._build_popup_text(data)
         m.email = data.get("Email", "")
         m.auftragsnummer = data.get("Auftragsnummer", "")
+        m.import_id = str(data.get("ImportID") or "").strip()
 
         self._style_marker_label(m)
         self.marker_list.append(m)
@@ -5482,6 +6548,99 @@ class ModernApp(ctk.CTk):
 
         self._rebuild_route_from_markers()
         self._trigger_route_metrics_recalc(force_routing=True)
+
+    def optimize_current_route_order(self):
+        self._ensure_depot_markers_exist()
+        regular_markers = [m for m in self.route_markers if m and not self._is_depot_marker(m)]
+        if len(regular_markers) < 2:
+            messagebox.showinfo("Route-Optimierung", "Für die Optimierung werden mindestens 2 Stopps benötigt.")
+            return
+
+        start_node = {
+            "id": "depot_start",
+            "name": "Start (Depot)",
+            "lat": self.depot_start_marker.position[0] if self.depot_start_marker else None,
+            "lon": self.depot_start_marker.position[1] if self.depot_start_marker else None,
+        }
+        end_node = {
+            "id": "depot_end",
+            "name": "Ende (Depot)",
+            "lat": self.depot_end_marker.position[0] if self.depot_end_marker else None,
+            "lon": self.depot_end_marker.position[1] if self.depot_end_marker else None,
+        }
+
+        stop_payload = []
+        marker_by_uid = {}
+        existing_map = {
+            self._stop_key(stop): dict(stop)
+            for stop in getattr(self, "current_route_stop_data", [])
+            if isinstance(stop, dict)
+        }
+        for index, marker in enumerate(regular_markers, start=1):
+            marker_key = self._marker_key(marker)
+            base = existing_map.get(marker_key)
+            stop = self._make_default_stop_from_marker(marker, existing=base, order=index)
+            uid = f"marker:{index}:{marker_key}"
+            stop["_optimizer_uid"] = uid
+            marker_by_uid[uid] = marker
+            stop_payload.append(stop)
+
+        optimization = optimize_stop_order(
+            start_node,
+            stop_payload,
+            end_node,
+            start_time=self.current_route_start_time,
+            travel_time_cache=self.current_route_travel_time_cache,
+        )
+        optimized_stops = optimization.get("stops") or []
+        ordered_markers = []
+        preferred_stops = []
+        seen = set()
+
+        for order, stop in enumerate(optimized_stops, start=1):
+            uid = str(stop.get("_optimizer_uid") or "")
+            marker = marker_by_uid.get(uid)
+            if marker is None:
+                continue
+            marker_id = id(marker)
+            if marker_id in seen:
+                continue
+            seen.add(marker_id)
+            ordered_markers.append(marker)
+            cleaned = dict(stop)
+            cleaned.pop("_optimizer_uid", None)
+            cleaned["order"] = order
+            preferred_stops.append(cleaned)
+
+        if len(ordered_markers) != len(regular_markers):
+            fallback = [m for m in regular_markers if id(m) not in seen]
+            ordered_markers.extend(fallback)
+            for marker in fallback:
+                preferred_stops.append(self._make_default_stop_from_marker(marker, order=len(preferred_stops) + 1))
+
+        if self.depot_start_marker and self.depot_end_marker:
+            self.route_markers = [self.depot_start_marker] + ordered_markers + [self.depot_end_marker]
+        else:
+            self.route_markers = ordered_markers
+
+        self._sync_current_route_stop_data_from_markers(preferred_stops=preferred_stops)
+        self._rebuild_route_from_markers()
+        self._trigger_route_metrics_recalc(force_routing=True)
+
+        best_metrics = optimization.get("metrics") or {}
+        baseline_metrics = optimization.get("baseline_metrics") or {}
+        before_drive = int(baseline_metrics.get("drive_minutes") or 0)
+        after_drive = int(best_metrics.get("drive_minutes") or 0)
+        before_late = int(baseline_metrics.get("late_minutes") or 0)
+        after_late = int(best_metrics.get("late_minutes") or 0)
+        messagebox.showinfo(
+            "Route-Optimierung",
+            (
+                "Stoppreihenfolge optimiert.\n"
+                f"Fahrzeit (geschätzt): {before_drive} min -> {after_drive} min\n"
+                f"Zeitfenster-Verstöße (geschätzt): {before_late} min -> {after_late} min"
+            ),
+        )
 
     def calculate_route(self):
         if len(self.route_points) < 2:
@@ -5526,7 +6685,10 @@ class ModernApp(ctk.CTk):
 
     def clear_route(self):
         if self.route_path:
-            self.route_path.delete()
+            try:
+                self.route_path.delete()
+            except Exception:
+                pass
         self.route_path = None
         self.route_points = []
         self.route_markers = []
@@ -5544,6 +6706,7 @@ class ModernApp(ctk.CTk):
             stops = [m for m in self.route_markers if m and not self._is_depot_marker(m)]
             self.route_markers = [self.depot_start_marker] + stops + [self.depot_end_marker]
         self._sync_current_route_stop_data_from_markers()
+        self._apply_route_marker_labels()
         self.route_points = [m.position for m in self.route_markers if hasattr(m, "position")]
 
         if len(self.route_points) >= 2:
@@ -5588,16 +6751,66 @@ class ModernApp(ctk.CTk):
             messagebox.showerror("Export", f"Konnte Google Maps nicht öffnen:\n{e}")
 
     # ---------- Marker click / status ----------
-    def on_marker_click(self, marker):
-        self.current_selected_marker = marker
+    def _set_info_card_text(self, text: str):
+        widget = getattr(self, "info_label", None)
+        value = str(text or "")
+        if widget is None:
+            return
+        if isinstance(widget, tk.Text):
+            try:
+                widget.configure(state="normal")
+                widget.delete("1.0", "end")
+                for line in value.splitlines(keepends=True):
+                    stripped = line.strip()
+                    if stripped == "Produkte:" or stripped == "Lieferadresse:":
+                        widget.insert("end", line, ("bold",))
+                    else:
+                        widget.insert("end", line)
+                widget.configure(state="disabled")
+                return
+            except Exception:
+                pass
+        try:
+            widget.configure(text=value)
+        except Exception:
+            pass
 
-        if hasattr(marker, "full_info"):
-            self.info_label.configure(text=marker.full_info)
+    def _set_tour_action_buttons_visible(self, visible: bool):
+        show_btn = getattr(self, "btn_show_tour", None)
+        remove_btn = getattr(self, "btn_remove_from_tour", None)
+        if visible:
+            if show_btn is not None:
+                show_btn.grid()
+            if remove_btn is not None:
+                remove_btn.grid()
+            return
+        if show_btn is not None:
+            show_btn.grid_remove()
+        if remove_btn is not None:
+            remove_btn.grid_remove()
 
+    def _set_edit_order_button_visible(self, visible: bool):
+        button = getattr(self, "btn_edit_order", None)
+        if button is None:
+            return
+        if visible:
+            button.grid()
+            return
+        button.grid_remove()
+
+    def _show_info_card(self):
         try:
             self.info_card.grid(row=0, column=1, padx=(0, 14), pady=14, sticky="nsew")
         except Exception:
             pass
+
+    def on_marker_click(self, marker):
+        self.current_selected_marker = marker
+
+        if hasattr(marker, "full_info"):
+            self._set_info_card_text(marker.full_info)
+
+        self._show_info_card()
 
         tour = self._pin_used_in_any_tour(marker)
 
@@ -5606,36 +6819,22 @@ class ModernApp(ctk.CTk):
                 self.status_menu.set("Bereits eingeplant")
                 self.status_menu.configure(state="disabled")
                 self._selected_pin_tour = tour
-                if hasattr(self, "btn_show_tour"):
-                    self.btn_show_tour.grid()
-                if hasattr(self, "btn_remove_from_tour"):
-                    self.btn_remove_from_tour.grid()
+                self._set_tour_action_buttons_visible(True)
             else:
                 self.status_menu.configure(state="normal")
                 self.status_menu.set(getattr(marker, "status", "nicht festgelegt"))
                 self._selected_pin_tour = None
-                if hasattr(self, "btn_show_tour"):
-                    self.btn_show_tour.grid_remove()
-                if hasattr(self, "btn_remove_from_tour"):
-                    self.btn_remove_from_tour.grid_remove()
+                self._set_tour_action_buttons_visible(False)
 
         # "Auftrag bearbeiten" nur bei normalen Pins
-        if hasattr(self, "btn_edit_order"):
-            if marker and not getattr(marker, "is_system", False):
-                self.btn_edit_order.grid()
-            else:
-                self.btn_edit_order.grid_remove()
+        self._set_edit_order_button_visible(bool(marker and not getattr(marker, "is_system", False)))
 
     def hide_info_card(self):
         try:
             self.info_card.grid_forget()
         except Exception:
             pass
-        if hasattr(self, "btn_edit_order"):
-            try:
-                self.btn_edit_order.grid_remove()
-            except Exception:
-                pass
+        self._set_edit_order_button_visible(False)
 
     def set_selected_pin_status(self, status: str):
         marker = getattr(self, "current_selected_marker", None)
@@ -5679,10 +6878,224 @@ class ModernApp(ctk.CTk):
 
         self.current_selected_marker = new_marker
         if new_marker:
-            self.info_label.configure(text=new_marker.full_info)
+            self._set_info_card_text(new_marker.full_info)
 
         self.save_pins()
         self._refresh_all_markers()
+
+    def _map_filter_button_text(self) -> str:
+        if bool(getattr(self, "map_filter_only_current_tour", False)):
+            return "Filter: Nur aktuelle Tour"
+
+        status_options = list(getattr(self, "map_filter_status_options", []))
+        delivery_options = list(getattr(self, "map_filter_delivery_type_options", []))
+        selected_statuses = {status for status in status_options if status in getattr(self, "map_filter_selected_statuses", set())}
+        selected_delivery = {delivery for delivery in delivery_options if delivery in getattr(self, "map_filter_selected_delivery_types", set())}
+        if len(selected_statuses) == len(status_options) and len(selected_delivery) == len(delivery_options):
+            return "Filter: Alle"
+        return f"Filter: {len(selected_statuses)} Status, {len(selected_delivery)} Lieferarten"
+
+    def _update_map_filter_button(self):
+        button = getattr(self, "map_filter_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(text=self._map_filter_button_text())
+        except Exception:
+            pass
+
+    def open_map_filter_dialog(self):
+        existing = getattr(self, "_map_filter_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Kartenfilter")
+        dlg.geometry("420x560")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=Theme.BG)
+        dlg.attributes("-topmost", True)
+        self._map_filter_dialog = dlg
+
+        shell = ctk.CTkFrame(dlg, corner_radius=16, fg_color=Theme.PANEL, border_width=1, border_color=Theme.BORDER)
+        shell.pack(fill="both", expand=True, padx=12, pady=12)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(2, weight=1)
+        shell.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            shell,
+            text="Pins nach Status/Lieferart filtern",
+            font=_font(14, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=0, column=0, padx=12, pady=(12, 8), sticky="w")
+
+        only_current_tour_var = tk.BooleanVar(value=bool(self.map_filter_only_current_tour))
+        ctk.CTkCheckBox(
+            shell,
+            text="Nur aktuelle Tour anzeigen",
+            variable=only_current_tour_var,
+            onvalue=True,
+            offvalue=False,
+            text_color=Theme.TEXT,
+        ).grid(row=1, column=0, padx=12, pady=(0, 8), sticky="w")
+
+        selected_statuses = set(getattr(self, "map_filter_selected_statuses", set()))
+        status_vars = {}
+        selected_delivery_types = {
+            _normalize_delivery_type(value)
+            for value in getattr(self, "map_filter_selected_delivery_types", set())
+        }
+        delivery_vars = {}
+        status_list = ctk.CTkScrollableFrame(
+            shell,
+            corner_radius=12,
+            fg_color=Theme.PANEL_2,
+            **_scrollable_frame_kwargs(),
+        )
+        status_list.grid(row=2, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        status_list.grid_columnconfigure(0, weight=1)
+
+        for row, status in enumerate(self.map_filter_status_options):
+            var = tk.BooleanVar(value=status in selected_statuses)
+            status_vars[status] = var
+            ctk.CTkCheckBox(
+                status_list,
+                text=status,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                text_color=Theme.TEXT,
+            ).grid(row=row, column=0, padx=8, pady=6, sticky="w")
+
+        ctk.CTkLabel(
+            shell,
+            text="Nach Lieferart filtern",
+            font=_font(13, "bold"),
+            text_color=Theme.TEXT,
+        ).grid(row=3, column=0, padx=12, pady=(4, 6), sticky="w")
+
+        delivery_list = ctk.CTkScrollableFrame(
+            shell,
+            corner_radius=12,
+            fg_color=Theme.PANEL_2,
+            **_scrollable_frame_kwargs(),
+        )
+        delivery_list.grid(row=4, column=0, padx=10, pady=(0, 8), sticky="nsew")
+        delivery_list.grid_columnconfigure(0, weight=1)
+
+        for row, delivery_type in enumerate(self.map_filter_delivery_type_options):
+            normalized = _normalize_delivery_type(delivery_type)
+            var = tk.BooleanVar(value=normalized in selected_delivery_types)
+            delivery_vars[normalized] = var
+            ctk.CTkCheckBox(
+                delivery_list,
+                text=normalized,
+                variable=var,
+                onvalue=True,
+                offvalue=False,
+                text_color=Theme.TEXT,
+            ).grid(row=row, column=0, padx=8, pady=6, sticky="w")
+
+        button_row = ctk.CTkFrame(shell, fg_color="transparent")
+        button_row.grid(row=5, column=0, padx=10, pady=(0, 10), sticky="ew")
+        button_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
+
+        def _set_all_statuses(value: bool):
+            for var in status_vars.values():
+                var.set(value)
+
+        def _set_all_delivery_types(value: bool):
+            for var in delivery_vars.values():
+                var.set(value)
+
+        def _close():
+            popup = getattr(self, "_map_filter_dialog", None)
+            self._map_filter_dialog = None
+            if popup is None:
+                return
+            try:
+                if popup.winfo_exists():
+                    popup.destroy()
+            except Exception:
+                pass
+
+        def _apply():
+            selected = {status for status, var in status_vars.items() if bool(var.get())}
+            selected_delivery = {delivery for delivery, var in delivery_vars.items() if bool(var.get())}
+            if not selected and not bool(only_current_tour_var.get()):
+                selected = set(self.map_filter_status_options)
+            if not selected_delivery and not bool(only_current_tour_var.get()):
+                selected_delivery = {_normalize_delivery_type(value) for value in self.map_filter_delivery_type_options}
+            self.map_filter_selected_statuses = selected
+            self.map_filter_selected_delivery_types = selected_delivery
+            self.map_filter_only_current_tour = bool(only_current_tour_var.get())
+            self._update_map_filter_button()
+            self._refresh_all_markers()
+            _close()
+
+        ctk.CTkButton(
+            button_row,
+            text="Alle",
+            height=34,
+            corner_radius=10,
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=lambda: _set_all_statuses(True),
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
+            button_row,
+            text="Keine Status",
+            height=34,
+            corner_radius=10,
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=lambda: _set_all_statuses(False),
+        ).grid(row=0, column=1, padx=4, sticky="ew")
+
+        ctk.CTkButton(
+            button_row,
+            text="Alle Lieferarten",
+            height=34,
+            corner_radius=10,
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=lambda: _set_all_delivery_types(True),
+        ).grid(row=1, column=0, padx=(0, 4), pady=(6, 0), sticky="ew")
+
+        ctk.CTkButton(
+            button_row,
+            text="Keine Lieferarten",
+            height=34,
+            corner_radius=10,
+            fg_color=Theme.PANEL,
+            hover_color=Theme.BORDER,
+            text_color=Theme.TEXT,
+            command=lambda: _set_all_delivery_types(False),
+        ).grid(row=1, column=1, padx=4, pady=(6, 0), sticky="ew")
+
+        ctk.CTkButton(
+            button_row,
+            text="Übernehmen",
+            height=34,
+            corner_radius=10,
+            fg_color=Theme.ACCENT,
+            hover_color=Theme.ACCENT_HOVER,
+            text_color=("white", "white"),
+            command=_apply,
+        ).grid(row=0, column=2, rowspan=2, padx=(4, 0), pady=(0, 0), sticky="nsew")
+
+        dlg.protocol("WM_DELETE_WINDOW", _close)
+        dlg.after(10, lambda: dlg.focus_force() if dlg.winfo_exists() else None)
 
     def delete_selected_pin(self):
         marker = getattr(self, "current_selected_marker", None)
@@ -5830,7 +7243,7 @@ class ModernApp(ctk.CTk):
     def open_customer_editor(self, marker):
         """
         Popup zum Bearbeiten der Adress-/Kundendaten eines Pins.
-        Aufrufbar aus XML Liste und Liefertouren (Doubleclick).
+        Aufrufbar aus Auftragsliste und Liefertouren (Doubleclick).
         """
         if not marker:
             return
@@ -5838,11 +7251,33 @@ class ModernApp(ctk.CTk):
             messagebox.showwarning("Kundenkartei", "Depot/System-Pins können nicht bearbeitet werden.")
             return
 
-        data = dict(getattr(marker, "data", {}) or {})
+        data = _normalize_order_and_delivery_addresses(dict(getattr(marker, "data", {}) or {}))
         # Sicherheit: Keys vorhanden
-        for k in ["Name", "Strasse", "PLZ", "Ort", "Email", "Telefon", "Gewicht", "Auftragsnummer", "Bestelldatum",
-                  "Status", "Notizen"]:
+        for k in [
+            "Name",
+            "Strasse",
+            "PLZ",
+            "Ort",
+            "Land",
+            "Email",
+            "Telefon",
+            "Gewicht",
+            "Produkte",
+            "Auftragsnummer",
+            "Bestelldatum",
+            "Status",
+            "Notizen",
+            "Lieferart",
+            "AuftragsadresseName",
+            "AuftragsadressePLZ",
+            "AuftragsadresseOrt",
+            "LieferadresseName",
+            "LieferadresseStrasse",
+            "LieferadressePLZ",
+            "LieferadresseOrt",
+        ]:
             data.setdefault(k, "")
+        data["Lieferart"] = _normalize_delivery_type(data.get("Lieferart"))
 
         dlg = ctk.CTkToplevel(self)
         dlg.title("Kundenkartei – Adresse bearbeiten")
@@ -5862,9 +7297,15 @@ class ModernApp(ctk.CTk):
         )
         ctk.CTkLabel(shell, text=f"Auftragsnummer: {data.get('Auftragsnummer', '')}", font=_font(12),
                      text_color=Theme.SUBTEXT).grid(row=1, column=0, padx=16, pady=(0, 12), sticky="w")
+        ctk.CTkLabel(
+            shell,
+            text=f"Auftragsadresse: {_format_order_address(data) or 'Nicht hinterlegt'}",
+            font=_font(12),
+            text_color=Theme.SUBTEXT,
+        ).grid(row=2, column=0, padx=16, pady=(0, 12), sticky="w")
 
         form = ctk.CTkFrame(shell, fg_color="transparent")
-        form.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="nsew")
+        form.grid(row=3, column=0, padx=16, pady=(0, 10), sticky="nsew")
         form.grid_columnconfigure((0, 1), weight=1)
 
         def _row(r, label, value, col=0, colspan=1):
@@ -5877,21 +7318,13 @@ class ModernApp(ctk.CTk):
             return e
 
         # Felder (Adresse & Kontakt)
-        ent_name = _row(0, "Name", data.get("Name", ""), col=0)
+        ent_name = _row(0, "Liefername", data.get("LieferadresseName", data.get("Name", "")), col=0)
         ent_email = _row(0, "Email", data.get("Email", ""), col=1)
-        ent_strasse = _row(2, "Strasse", data.get("Strasse", ""), col=0, colspan=2)
-        ent_plz = _row(4, "PLZ", data.get("PLZ", ""), col=0)
-        ent_ort = _row(4, "Ort", data.get("Ort", ""), col=1)
+        ent_strasse = _row(2, "Lieferstrasse", data.get("LieferadresseStrasse", data.get("Strasse", "")), col=0, colspan=2)
+        ent_plz = _row(4, "Liefer-PLZ", data.get("LieferadressePLZ", data.get("PLZ", "")), col=0)
+        ent_ort = _row(4, "Lieferort", data.get("LieferadresseOrt", data.get("Ort", "")), col=1)
         ent_tel = _row(6, "Telefon", data.get("Telefon", ""), col=0)
         ent_gewicht = _row(6, "Gewicht", data.get("Gewicht", ""), col=1)
-
-        ctk.CTkLabel(form, text="Notizen", font=_font(12, "bold"), text_color=Theme.SUBTEXT).grid(
-            row=10, column=0, padx=8, pady=(10, 2), sticky="w", columnspan=2
-        )
-
-        notes_box = ctk.CTkTextbox(form, height=120, corner_radius=12)
-        notes_box.grid(row=11, column=0, padx=8, pady=(0, 6), sticky="nsew", columnspan=2)
-        notes_box.insert("1.0", data.get("Notizen", "") or "")
 
         # Status (optional editierbar – wenn du es NUR Adresse willst: Block einfach entfernen)
         ctk.CTkLabel(form, text="Status", font=_font(12, "bold"), text_color=Theme.SUBTEXT).grid(
@@ -5908,13 +7341,38 @@ class ModernApp(ctk.CTk):
             button_hover_color=Theme.ACCENT_HOVER,
             text_color=Theme.TEXT
         )
-        form.grid_rowconfigure(11, weight=1)
         status_menu.grid(row=9, column=0, padx=8, pady=(0, 6), sticky="ew", columnspan=2)
         status_menu.set(data.get("Status", "nicht festgelegt") or "nicht festgelegt")
 
+        ctk.CTkLabel(form, text="Lieferart", font=_font(12, "bold"), text_color=Theme.SUBTEXT).grid(
+            row=10, column=0, padx=8, pady=(10, 2), sticky="w", columnspan=2
+        )
+        delivery_type_menu = ctk.CTkOptionMenu(
+            form,
+            values=DELIVERY_TYPE_OPTIONS,
+            corner_radius=12,
+            height=36,
+            font=_font(13, "bold"),
+            fg_color=Theme.PANEL,
+            button_color=Theme.ACCENT,
+            button_hover_color=Theme.ACCENT_HOVER,
+            text_color=Theme.TEXT,
+        )
+        delivery_type_menu.grid(row=11, column=0, padx=8, pady=(0, 6), sticky="ew", columnspan=2)
+        delivery_type_menu.set(_normalize_delivery_type(data.get("Lieferart", DEFAULT_DELIVERY_TYPE)))
+
+        ctk.CTkLabel(form, text="Notizen", font=_font(12, "bold"), text_color=Theme.SUBTEXT).grid(
+            row=12, column=0, padx=8, pady=(10, 2), sticky="w", columnspan=2
+        )
+
+        notes_box = ctk.CTkTextbox(form, height=120, corner_radius=12)
+        notes_box.grid(row=13, column=0, padx=8, pady=(0, 6), sticky="nsew", columnspan=2)
+        notes_box.insert("1.0", data.get("Notizen", "") or "")
+        form.grid_rowconfigure(13, weight=1)
+
         # Buttons unterhalb der Daten: "Auf Karte anzeigen" & "Tour anzeigen"
         action_row = ctk.CTkFrame(shell, fg_color="transparent")
-        action_row.grid(row=3, column=0, padx=16, pady=(4, 8), sticky="ew")
+        action_row.grid(row=4, column=0, padx=16, pady=(4, 8), sticky="ew")
         action_row.grid_columnconfigure((0, 1), weight=1)
 
         def _show_on_map():
@@ -5959,7 +7417,7 @@ class ModernApp(ctk.CTk):
 
         # Footer Buttons: Speichern / Schließen
         footer = ctk.CTkFrame(shell, fg_color="transparent")
-        footer.grid(row=4, column=0, padx=16, pady=(8, 16), sticky="ew")
+        footer.grid(row=5, column=0, padx=16, pady=(8, 16), sticky="ew")
         footer.grid_columnconfigure((0, 1), weight=1)
 
         def _save():
@@ -5970,10 +7428,16 @@ class ModernApp(ctk.CTk):
             new_data["Strasse"] = ent_strasse.get().strip()
             new_data["PLZ"] = ent_plz.get().strip()
             new_data["Ort"] = ent_ort.get().strip()
+            new_data["LieferadresseName"] = new_data["Name"]
+            new_data["LieferadresseStrasse"] = new_data["Strasse"]
+            new_data["LieferadressePLZ"] = new_data["PLZ"]
+            new_data["LieferadresseOrt"] = new_data["Ort"]
             new_data["Telefon"] = ent_tel.get().strip()
             new_data["Gewicht"] = ent_gewicht.get().strip()
             new_data["Status"] = status_menu.get().strip() or "nicht festgelegt"
+            new_data["Lieferart"] = _normalize_delivery_type(delivery_type_menu.get().strip())
             new_data["Notizen"] = notes_box.get("1.0", "end-1c").strip()
+            new_data = _normalize_order_and_delivery_addresses(new_data)
 
             marker.data = new_data
             marker.email = new_data.get("Email", "")
@@ -6023,7 +7487,9 @@ class ModernApp(ctk.CTk):
     def load_config(self):
         try:
             cfg = self.settings_manager.load()
-            self.xml_folder = cfg.get("xml_folder") or None
+            self.sql_data_dir = str(cfg.get("sql_data_dir") or self.sql_data_dir or DEFAULT_SQL_DATA_DIR).strip()
+            self.sql_server_instance = str(cfg.get("sql_server_instance") or self.sql_server_instance or r".\SQLEXPRESS").strip()
+            self.sql_database = str(cfg.get("sql_database") or "").strip() or infer_database_name_from_data_dir(self.sql_data_dir)
             self.appearance_preference = str(cfg.get("appearance_mode") or "System").title()
             self.quick_access_items = self.normalize_quick_access_items(cfg.get("quick_access_items", DEFAULT_QUICK_ACCESS_ITEMS))
             self.set_appearance_preference(self.appearance_preference, persist=False)
@@ -6035,7 +7501,9 @@ class ModernApp(ctk.CTk):
         try:
             self.settings_manager.save(
                 {
-                    "xml_folder": self.xml_folder or "",
+                    "sql_data_dir": self.sql_data_dir or DEFAULT_SQL_DATA_DIR,
+                    "sql_server_instance": self.sql_server_instance or r".\SQLEXPRESS",
+                    "sql_database": self.sql_database or "",
                     "appearance_mode": self.get_appearance_preference(),
                     "quick_access_items": self.normalize_quick_access_items(self.quick_access_items),
                 }
@@ -6108,14 +7576,19 @@ class ModernApp(ctk.CTk):
     def _on_auto_backup_finished(self):
         self._auto_backup_running = False
 
-    def select_xml_folder(self):
-        folder = filedialog.askdirectory(title="Ordner mit XML-Dateien auswählen")
+    def select_sql_data_dir(self):
+        folder = filedialog.askdirectory(title="SQL-Datenordner auswählen")
         if not folder:
             return
-        self.xml_folder = folder
+        self.sql_data_dir = folder
+        guessed_database = infer_database_name_from_data_dir(self.sql_data_dir)
+        if guessed_database:
+            self.sql_database = guessed_database
         self.save_config()
-        self._sync_seen_files()
-        messagebox.showinfo("Ordner gespeichert", f"XML-Ordner:\n{folder}")
+        messagebox.showinfo(
+            "Ordner gespeichert",
+            f"SQL-Datenordner:\n{folder}\n\nDatenbank: {self.sql_database or 'nicht erkannt'}",
+        )
 
     def _normalize_address_query(self, address: str, country_hint: str = "Schweiz") -> str:
         address = (address or "").strip()
@@ -6126,74 +7599,12 @@ class ModernApp(ctk.CTk):
             return f"{address}, {country_hint}"
         return address
 
-    def _load_xml_import_signatures(self) -> dict[str, dict]:
-        try:
-            payload = load_json_file(self.xml_import_state_file, default=dict, create_if_missing=False, backup_invalid=True)
-        except (InvalidJsonFileError, OSError):
-            logger.exception("XML import state could not be loaded.")
-            return {}
-
-        signatures = {}
-        if isinstance(payload, dict):
-            for file_path, signature in payload.items():
-                if not isinstance(signature, dict):
-                    continue
-                try:
-                    signatures[str(file_path)] = {
-                        "mtime_ns": int(signature.get("mtime_ns", 0)),
-                        "size": int(signature.get("size", 0)),
-                    }
-                except (TypeError, ValueError):
-                    continue
-        return signatures
-
-    def _save_xml_import_signatures(self):
-        try:
-            atomic_write_json(self.xml_import_state_file, self._xml_import_signatures)
-        except OSError:
-            logger.exception("XML import state could not be saved.")
-
-    def _get_xml_file_signature(self, file_path: str) -> dict | None:
-        try:
-            stat = os.stat(file_path)
-        except OSError:
-            return None
-        return {"mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), "size": int(stat.st_size)}
-
-    def _xml_file_has_changed(self, file_path: str) -> bool:
-        current_signature = self._get_xml_file_signature(file_path)
-        if current_signature is None:
-            return False
-        return self._xml_import_signatures.get(file_path) != current_signature
-
-    def _filter_changed_xml_files(self, xml_files: list[str]) -> list[str]:
-        return [file_path for file_path in xml_files if self._xml_file_has_changed(file_path)]
-
-    def _update_xml_import_signatures(self, processed_files: list[str], current_files: list[str] | None = None):
-        changed = False
-        for file_path in processed_files:
-            signature = self._get_xml_file_signature(file_path)
-            if signature is None:
-                continue
-            if self._xml_import_signatures.get(file_path) != signature:
-                self._xml_import_signatures[file_path] = signature
-                changed = True
-
-        if current_files is not None:
-            current_set = set(current_files)
-            xml_folder_prefix = str(self.xml_folder or "")
-            for file_path in list(self._xml_import_signatures.keys()):
-                if xml_folder_prefix and file_path.startswith(xml_folder_prefix) and file_path not in current_set:
-                    self._xml_import_signatures.pop(file_path, None)
-                    changed = True
-
-        if changed:
-            self._save_xml_import_signatures()
-
     def _invalidate_tour_data_caches(self):
         self._tour_data_revision += 1
         self._calendar_payload_cache = {}
         self._calendar_payload_revision = -1
+        self._tour_usage_cache = {}
+        self._tour_usage_cache_revision = -1
 
     def get_calendar_payload_revision(self) -> int:
         return self._calendar_payload_revision
@@ -6227,167 +7638,615 @@ class ModernApp(ctk.CTk):
             except Exception:
                 pass
 
-    # ---------- XML Import ----------
-    def import_xml_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("XML Dateien", "*.xml")])
-        if not file_path:
-            return
-        self._start_xml_import([file_path], silent=False)
+    def is_sql_import_running(self) -> bool:
+        running = bool(getattr(self, "_sql_import_running", False))
+        if not running:
+            return False
+        started_at = getattr(self, "_sql_import_started_at", None)
+        if started_at is None:
+            # Recover from stale state after crashes/exceptions where running stayed True.
+            self._set_sql_import_status("Bereit", running=False)
+            return False
+        return True
 
-    def import_xml_from_folder(self, silent: bool = False):
-        if not self.xml_folder or not os.path.isdir(self.xml_folder):
+    def get_sql_import_status_text(self) -> str:
+        return str(getattr(self, "_sql_import_status_text", "Bereit") or "Bereit")
+
+    def _set_sql_import_status(self, text: str, *, running: bool | None = None):
+        self._sql_import_status_text = str(text or "").strip() or "Bereit"
+        if running is not None:
+            self._sql_import_running = bool(running)
+        self._refresh_pages("list", "nonmap", visible_only=False)
+
+    def _load_pending_sql_orders(self):
+        self.pending_sql_orders = []
+        try:
+            payload = load_json_file(
+                self.pending_orders_file,
+                default=list,
+                create_if_missing=False,
+                backup_invalid=True,
+            )
+        except InvalidJsonFileError:
+            logger.exception("Pending SQL orders file is invalid.")
+            return
+        except OSError:
+            logger.exception("Pending SQL orders file could not be loaded.")
+            return
+        if not isinstance(payload, list):
+            return
+        items = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            order_number = str(raw.get("Auftragsnummer") or "").strip()
+            import_id = str(raw.get("ImportID") or "").strip()
+            if not order_number and not import_id:
+                continue
+            item = dict(raw)
+            item["Auftragsnummer"] = order_number
+            item["ImportID"] = import_id
+            item.setdefault("Status", "nicht festgelegt")
+            item.setdefault("Lieferart", DEFAULT_DELIVERY_TYPE)
+            item = _normalize_order_and_delivery_addresses(item)
+            items.append(item)
+        self.pending_sql_orders = items
+
+    def _save_pending_sql_orders(self):
+        try:
+            atomic_write_json(self.pending_orders_file, list(self.pending_sql_orders or []))
+        except OSError:
+            logger.exception("Pending SQL orders could not be saved.")
+
+    def _load_non_map_sql_orders(self):
+        self.non_map_sql_orders = []
+        try:
+            payload = load_json_file(
+                self.non_map_orders_file,
+                default=list,
+                create_if_missing=False,
+                backup_invalid=True,
+            )
+        except InvalidJsonFileError:
+            logger.exception("Non-map SQL orders file is invalid.")
+            return
+        except OSError:
+            logger.exception("Non-map SQL orders file could not be loaded.")
+            return
+        if not isinstance(payload, list):
+            return
+        items = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            order_number = str(raw.get("Auftragsnummer") or "").strip()
+            import_id = str(raw.get("ImportID") or "").strip()
+            if not order_number and not import_id:
+                continue
+            item = _normalize_order_and_delivery_addresses(dict(raw))
+            item["Auftragsnummer"] = order_number
+            item["ImportID"] = import_id
+            item["NichtKarteKategorie"] = _normalize_non_map_order_category(
+                item.get("NichtKarteKategorie") or item.get("Lieferart")
+            )
+            items.append(item)
+        self.non_map_sql_orders = items
+
+    def _save_non_map_sql_orders(self):
+        try:
+            atomic_write_json(self.non_map_orders_file, list(self.non_map_sql_orders or []))
+        except OSError:
+            logger.exception("Non-map SQL orders could not be saved.")
+
+    def _write_geocode_failure_report(self, samples: list[dict]) -> str | None:
+        if not samples:
+            return None
+        try:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            path = Path(self.logs_dir) / f"sql_import_geocode_failed_{ts}.txt"
+            lines = [
+                "SQL-Import: Geocoding fehlgeschlagen",
+                f"Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
+                f"Eintraege: {len(samples)}",
+                "",
+            ]
+            for idx, item in enumerate(samples, start=1):
+                order_number = str(item.get("Auftragsnummer") or "").strip()
+                import_id = str(item.get("ImportID") or "").strip()
+                name = str(item.get("Name") or "").strip()
+                street = str(item.get("Strasse") or "").strip()
+                plz = str(item.get("PLZ") or "").strip()
+                ort = str(item.get("Ort") or "").strip()
+                land = str(item.get("Land") or "").strip()
+                query_list = item.get("queries") or []
+                lines.append(
+                    f"{idx}. ImportID={import_id} | Auftrag={order_number} | Name={name} | Adresse={street}, {plz} {ort}, {land}"
+                )
+                if query_list:
+                    lines.append("   Versuche: " + " || ".join(str(q).strip() for q in query_list if str(q).strip()))
+                lines.append("")
+            path.write_text("\n".join(lines), encoding="utf-8")
+            return str(path)
+        except OSError:
+            logger.exception("Geocoding failure report could not be written.")
+            return None
+
+    # ---------- SQL Import ----------
+    def _build_geocode_query_candidates(self, payload: dict, country_hint: str) -> list[str]:
+        normalized = _normalize_order_and_delivery_addresses(payload)
+        street = str(normalized.get("LieferadresseStrasse") or "").strip()
+        plz = str(normalized.get("LieferadressePLZ") or "").strip()
+        ort = str(normalized.get("LieferadresseOrt") or "").strip()
+        candidates = []
+        if street or plz or ort:
+            candidates.append(self._normalize_address_query(f"{street}, {plz} {ort}", country_hint=country_hint))
+        if street and (plz or ort):
+            candidates.append(self._normalize_address_query(f"{street} {plz} {ort}", country_hint=country_hint))
+        if plz or ort:
+            candidates.append(self._normalize_address_query(f"{plz} {ort}", country_hint=country_hint))
+        if ort:
+            candidates.append(self._normalize_address_query(ort, country_hint=country_hint))
+        deduped = []
+        seen = set()
+        for text in candidates:
+            q = str(text or "").strip()
+            if not q:
+                continue
+            key = q.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(q)
+        return deduped
+
+    def _lookup_geocode_for_payload(self, payload: dict) -> tuple[tuple[float, float] | None, list[str], bool]:
+        attempted_queries = []
+        had_exception = False
+        country_hint = _country_hint_from_code(payload.get("Land"))
+        queries = self._build_geocode_query_candidates(payload, country_hint)
+        latlng = None
+        for query in queries:
+            attempted_queries.append(query)
+            try:
+                latlng = self.geocoding_service.lookup(query)
+            except Exception:
+                logger.exception("Geocoding failed for order %s", str(payload.get("Auftragsnummer") or "").strip())
+                had_exception = True
+                latlng = None
+            if latlng:
+                break
+        return latlng, attempted_queries, had_exception
+
+    def import_from_sql(self, silent: bool = False):
+        if self.is_sql_import_running():
             if not silent:
-                messagebox.showwarning("XML Ordner", "Kein gültiger XML-Ordner gesetzt. Bitte zuerst Ordner auswählen.")
-            return
-
-        xml_files = sorted(
-            os.path.join(self.xml_folder, f)
-            for f in os.listdir(self.xml_folder)
-            if f.lower().endswith(".xml")
-        )
-
-        if not xml_files:
-            if not silent:
-                messagebox.showinfo("XML Ordner", "Keine XML-Dateien im Ordner gefunden.")
-            return
-
-        changed_files = self._filter_changed_xml_files(xml_files)
-        if not changed_files:
-            self._update_xml_import_signatures([], current_files=xml_files)
-            if not silent:
-                messagebox.showinfo("Import", "Keine neuen oder geänderten XML-Dateien gefunden.")
-            return
-
-        self._start_xml_import(changed_files, silent=silent, current_files=xml_files)
-
-    def _start_xml_import(self, xml_files: list[str], silent: bool, current_files: list[str] | None = None):
-        if not xml_files:
+                messagebox.showinfo("Import", "Ein SQL-Import läuft bereits. Bitte warten, bis er abgeschlossen ist.")
             return
 
         self._import_job += 1
         job_id = self._import_job
-        existing_orders = {
-            str(getattr(marker, "auftragsnummer", "")).strip()
-            for marker in self.marker_list
-            if not getattr(marker, "is_system", False)
-        }
+        self._sql_import_started_at = datetime.now()
+        self._set_sql_import_status(f"Läuft seit {self._sql_import_started_at.strftime('%H:%M:%S')}", running=True)
+
+        existing_item_state = {}
+        for marker in self.marker_list:
+            if getattr(marker, "is_system", False):
+                continue
+            marker_data = dict(getattr(marker, "data", {}) or {})
+            identity_key = self._item_identity_key(marker_data)
+            if identity_key is None:
+                continue
+            try:
+                lat, lng = marker.position[0], marker.position[1]
+            except Exception:
+                lat, lng = None, None
+            existing_item_state[identity_key] = {
+                "lat": lat,
+                "lng": lng,
+                "status": str(getattr(marker, "status", "nicht festgelegt") or "nicht festgelegt"),
+                "has_coords": lat is not None and lng is not None,
+            }
+        existing_pending_state = {}
+        for item in list(self.pending_sql_orders or []):
+            if not isinstance(item, dict):
+                continue
+            identity_key = self._item_identity_key(item)
+            if identity_key is None:
+                continue
+            existing_pending_state[identity_key] = dict(item)
+        existing_non_map_state = {}
+        for item in list(self.non_map_sql_orders or []):
+            if not isinstance(item, dict):
+                continue
+            identity_key = self._item_identity_key(item)
+            if identity_key is None:
+                continue
+            existing_non_map_state[identity_key] = dict(item)
 
         def _worker():
-            imported_items = []
-            seen_orders = set(existing_orders)
-            errors = []
-            processed_files = []
-            for file_path in xml_files:
-                try:
-                    imported_items.extend(self._parse_xml_import(file_path, seen_orders))
-                    processed_files.append(file_path)
-                except Exception as exc:
-                    logger.exception("XML import failed for %s", file_path)
-                    errors.append((file_path, str(exc)))
+            upsert_items = []
+            pending_items = []
+            non_map_items = []
+            error_text = None
+            open_items_from_sql = set()
+            open_map_items_from_sql = set()
+            stats = {
+                "rows_total": 0,
+                "duplicate_sql_rows": 0,
+                "skipped_non_map_delivery": 0,
+                "created": 0,
+                "updated": 0,
+                "removed": 0,
+                "removed_without_order_number": 0,
+                "pending_total": 0,
+                "pending_existing": 0,
+                "geocoded_in_background": 0,
+                "geocode_failed": 0,
+                "geocode_errors": 0,
+                "geocode_failed_samples": [],
+            }
+            try:
+                database = str(self.sql_database or "").strip() or infer_database_name_from_data_dir(self.sql_data_dir)
+                if not database:
+                    raise RuntimeError("Keine Nutzdatenbank im SQL-Datenordner gefunden.")
+                self.sql_database = database
+                rows = fetch_order_rows(
+                    server_instance=self.sql_server_instance,
+                    database=database,
+                    limit=20000,
+                )
+                stats["rows_total"] = len(rows)
+                for row in rows:
+                    order_number = str(row.get("Auftragsnummer") or "").strip()
+                    if not order_number:
+                        continue
+                    import_id = str(row.get("ImportID") or "").strip()
+                    identity_key = self._item_identity_key({"ImportID": import_id, "Auftragsnummer": order_number})
+                    if identity_key is None:
+                        continue
+                    if identity_key in open_items_from_sql:
+                        stats["duplicate_sql_rows"] += 1
+                        continue
+                    delivery_label, include_on_map = _resolve_sql_delivery_handling(row.get("Liefercode"))
+                    open_items_from_sql.add(identity_key)
+                    non_map_category = _normalize_non_map_order_category(delivery_label or row.get("Liefercode"))
+                    base_payload = {
+                        "ImportID": import_id,
+                        "Auftragsnummer": order_number,
+                        "Bestelldatum": _display_date_string(row.get("Bestelldatum")) or "N/A",
+                        "Name": row.get("Name") or "Unbekannt",
+                        "Strasse": row.get("Strasse") or "",
+                        "PLZ": row.get("PLZ") or "",
+                        "Ort": row.get("Ort") or "",
+                        "AuftragsadresseName": row.get("AuftragName") or "",
+                        "AuftragsadressePLZ": row.get("AuftragPLZ") or "",
+                        "AuftragsadresseOrt": row.get("AuftragOrt") or "",
+                        "LieferadresseName": row.get("Name") or "Unbekannt",
+                        "LieferadresseStrasse": row.get("Strasse") or "",
+                        "LieferadressePLZ": row.get("PLZ") or "",
+                        "LieferadresseOrt": row.get("Ort") or "",
+                        "Land": row.get("Land") or "",
+                        "Email": row.get("Email") or "N/A",
+                        "Telefon": row.get("Telefon") or "N/A",
+                        "Gewicht": row.get("ProduktgewichtTotal") or row.get("Gewicht") or "N/A",
+                        "Auftragsgewicht": row.get("Gewicht") or "",
+                        "Produkte": row.get("Produkte") or "",
+                        "Notizen": row.get("Notizen") or "",
+                        "Lieferart": delivery_label,
+                        "NichtKarteKategorie": non_map_category,
+                    }
+                    payload = _normalize_order_and_delivery_addresses(base_payload)
+                    previous = existing_item_state.get(identity_key)
+                    previous_pending = existing_pending_state.get(identity_key)
+                    previous_non_map = existing_non_map_state.get(identity_key)
+                    payload["Status"] = (previous or previous_pending or previous_non_map or {}).get("status", "nicht festgelegt")
+                    if not include_on_map:
+                        stats["skipped_non_map_delivery"] += 1
+                        non_map_items.append(payload)
+                        continue
+                    open_map_items_from_sql.add(identity_key)
+                    if previous and previous.get("has_coords"):
+                        payload["lat"], payload["lng"] = previous["lat"], previous["lng"]
+                        upsert_items.append(payload)
+                        stats["updated"] += 1
+                        continue
+                    pending_items.append(payload)
+                    if previous_pending:
+                        stats["pending_existing"] += 1
+                    else:
+                        stats["created"] += 1
+                stats["pending_total"] = len(pending_items)
+
+                existing_map_identities = set(existing_item_state.keys()).union(existing_pending_state.keys())
+                items_to_remove = sorted(existing_map_identities - open_map_items_from_sql)
+                stats["removed"] = len(items_to_remove)
+            except Exception as exc:
+                logger.exception("SQL import failed.")
+                error_text = str(exc)
+                items_to_remove = []
 
             cache_error = None
             try:
                 self.geocoding_service.save_cache()
             except OSError as exc:
-                logger.exception("Geocode cache could not be saved after XML import.")
+                logger.exception("Geocode cache could not be saved after SQL import.")
                 cache_error = str(exc)
 
             self.after(
                 0,
-                lambda: self._finish_xml_import(
+                lambda: self._finish_sql_import(
                     job_id,
-                    xml_files,
-                    imported_items,
-                    errors,
+                    upsert_items,
+                    pending_items,
+                    non_map_items,
+                    items_to_remove,
+                    error_text,
                     cache_error,
                     silent,
-                    processed_files=processed_files,
-                    current_files=current_files,
+                    stats,
                 ),
             )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _parse_xml_import(self, file_path: str, seen_orders: set[str]) -> list[dict]:
-        tree = ET.parse(file_path)
-        root = tree.getroot()
-        imported_items = []
-
-        for entry in root:
-            order_number = entry.findtext("Auftragsnummer", default="N/A")
-            if order_number in seen_orders:
-                continue
-
-            payload = {
-                "Auftragsnummer": order_number,
-                "Bestelldatum": entry.findtext("Bestelldatum", default="N/A"),
-                "Name": entry.findtext("Name", default="Unbekannt"),
-                "Strasse": entry.findtext("Strasse", default=""),
-                "PLZ": entry.findtext("PLZ", default=""),
-                "Ort": entry.findtext("Ort", default=""),
-                "Email": entry.findtext("Email", default="N/A"),
-                "Telefon": entry.findtext("Telefon", default="N/A"),
-                "Gewicht": entry.findtext("Gewicht", default="N/A"),
-                "Notizen": entry.findtext("Notizen", default=""),
-            }
-
-            full_address = self._normalize_address_query(f"{payload['Strasse']}, {payload['PLZ']} {payload['Ort']}")
-            latlng = self.geocoding_service.lookup(full_address)
-            if not latlng:
-                continue
-
-            payload["lat"], payload["lng"] = latlng
-            payload["Status"] = "nicht festgelegt"
-            imported_items.append(payload)
-            seen_orders.add(order_number)
-
-        return imported_items
-
-    def _finish_xml_import(
+    def _finish_sql_import(
         self,
         job_id: int,
-        xml_files: list[str],
-        imported_items: list[dict],
-        errors: list[tuple[str, str]],
+        upsert_items: list[dict],
+        pending_items: list[dict],
+        non_map_items: list[dict],
+        items_to_remove: list[tuple[str, str]],
+        error_text: str | None,
         cache_error: str | None,
         silent: bool,
-        processed_files: list[str] | None = None,
-        current_files: list[str] | None = None,
+        stats: dict | None = None,
     ):
         if job_id != self._import_job:
             return
-
-        self._update_xml_import_signatures(processed_files or [], current_files=current_files)
-
-        for item in imported_items:
-            self._create_marker(item["lat"], item["lng"], item, item["Status"])
-
-        if imported_items:
-            self.save_pins()
-            self.show_page("map")
-
-        if cache_error:
-            messagebox.showwarning("Import", f"Geocode-Cache konnte nicht gespeichert werden:\n{cache_error}")
-
-        if errors:
-            file_path, error_text = errors[0]
-            messagebox.showerror("Fehler", f"XML konnte nicht verarbeitet werden:\n{file_path}\n\n{error_text}")
-            return
-
-        if not silent:
-            messagebox.showinfo("Import", f"Import abgeschlossen.\nDateien: {len(xml_files)}\nNeu importiert: {len(imported_items)}")
-
-    def import_single_xml(self, file_path: str) -> bool:
         try:
-            items = self._parse_xml_import(file_path, set())
-            for item in items:
-                self._create_marker(item["lat"], item["lng"], item, item["Status"])
-            self._update_xml_import_signatures([file_path])
-            return bool(items)
-        except (ET.ParseError, OSError, ValueError) as e:
-            logger.exception("XML could not be processed: %s", file_path)
-            messagebox.showerror("Fehler", f"XML konnte nicht verarbeitet werden:\n{file_path}\n\n{e}")
-            return False
+            marker_by_identity, markers_without_identity = self._collect_non_system_markers_by_identity()
+
+            removed_markers = set()
+            for marker in markers_without_identity:
+                removed_markers.add(marker)
+                self._delete_marker_safely(marker, remove_from_list=True)
+
+            for identity_key in items_to_remove:
+                marker = marker_by_identity.get(identity_key)
+                if marker is None:
+                    continue
+                removed_markers.add(marker)
+                self._delete_marker_safely(marker, remove_from_list=True)
+
+            for item in upsert_items:
+                identity_key = self._item_identity_key(item)
+                marker = marker_by_identity.get(identity_key)
+                if marker is None:
+                    self._create_marker(item["lat"], item["lng"], item, item["Status"])
+                    continue
+                self._apply_payload_to_existing_marker(marker, item)
+
+            pending_map = {self._item_identity_key(item): dict(item) for item in pending_items if self._item_identity_key(item)}
+            non_map_map = {self._item_identity_key(item): dict(item) for item in non_map_items if self._item_identity_key(item)}
+            for identity_key in items_to_remove:
+                pending_map.pop(identity_key, None)
+                non_map_map.pop(identity_key, None)
+            self.pending_sql_orders = list(pending_map.values())
+            self._save_pending_sql_orders()
+            self.non_map_sql_orders = list(non_map_map.values())
+            self._save_non_map_sql_orders()
+
+            if removed_markers:
+                stats = stats or {}
+                stats["removed_without_order_number"] = len(markers_without_identity)
+                self.route_markers = [m for m in self.route_markers if m not in removed_markers]
+                try:
+                    self._rebuild_route_from_markers()
+                except Exception:
+                    pass
+                if getattr(self, "current_selected_marker", None) in removed_markers:
+                    self.current_selected_marker = None
+                    self.hide_info_card()
+
+            self._refresh_after_sql_marker_changes(bool(upsert_items or removed_markers), show_map=True)
+            self._refresh_pages("nonmap", visible_only=False)
+            self._warn_sql_cache_save_error(cache_error)
+
+            stats = stats or {}
+            if error_text:
+                self._fail_sql_import(error_text, message="SQL-Import konnte nicht verarbeitet werden")
+                return
+
+            pending_total = int(stats.get("pending_total", 0))
+            if pending_total <= 0:
+                finished_status = (
+                    f"Fertig: gelesen {int(stats.get('rows_total', 0))}, neu {int(stats.get('created', 0))}, "
+                    f"aktualisiert {int(stats.get('updated', 0))}"
+                )
+                self._set_sql_import_status(finished_status, running=False)
+                if not silent:
+                    messagebox.showinfo(
+                        "Import",
+                        "SQL-Import abgeschlossen.\n"
+                        f"Datenbank: {self.sql_database or 'Unbekannt'}\n"
+                        f"SQL-Aufträge gelesen: {int(stats.get('rows_total', 0))}\n"
+                        f"Neu angelegt: {int(stats.get('created', 0))}\n"
+                        f"Aktualisiert: {int(stats.get('updated', 0))}\n"
+                        f"Ohne Karte (Lieferart): {int(stats.get('skipped_non_map_delivery', 0))}\n"
+                        f"Entfernt (nicht mehr offen): {int(stats.get('removed', 0))}\n"
+                        f"Entfernt (ohne Auftragsnummer): {int(stats.get('removed_without_order_number', 0))}\n"
+                        f"Doppelte SQL-Zeilen: {int(stats.get('duplicate_sql_rows', 0))}",
+                    )
+                return
+
+            self._set_sql_import_status(f"Liste bereit. Geocoding läuft 0/{pending_total}", running=True)
+            self._pending_geocode_job += 1
+            geocode_job_id = self._pending_geocode_job
+            pending_snapshot = list(self.pending_sql_orders)
+            threading.Thread(
+                target=self._run_pending_geocode,
+                args=(job_id, geocode_job_id, pending_snapshot, stats, silent),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            logger.exception("Finalizing SQL import failed.")
+            self._fail_sql_import(exc, message="SQL-Import konnte nicht abgeschlossen werden")
+
+    def _run_pending_geocode(
+        self,
+        import_job_id: int,
+        geocode_job_id: int,
+        pending_items: list[dict],
+        phase1_stats: dict,
+        silent: bool,
+    ):
+        try:
+            resolved_items = []
+            unresolved_items = []
+            failed_samples = []
+            geocode_errors = 0
+            total = len(pending_items)
+            for index, item in enumerate(pending_items, start=1):
+                if import_job_id != self._import_job or geocode_job_id != self._pending_geocode_job:
+                    return
+                payload = dict(item)
+                latlng, attempted_queries, had_exception = self._lookup_geocode_for_payload(payload)
+                if had_exception:
+                    geocode_errors += 1
+                if latlng:
+                    payload["lat"], payload["lng"] = latlng
+                    resolved_items.append(payload)
+                else:
+                    unresolved_items.append(payload)
+                    if len(failed_samples) < 30:
+                        failed_samples.append(
+                            {
+                                "ImportID": payload.get("ImportID", ""),
+                                "Auftragsnummer": payload.get("Auftragsnummer", ""),
+                                "Name": payload.get("Name", ""),
+                                "Strasse": payload.get("Strasse", ""),
+                                "PLZ": payload.get("PLZ", ""),
+                                "Ort": payload.get("Ort", ""),
+                                "Land": payload.get("Land", ""),
+                                "queries": list(attempted_queries),
+                            }
+                        )
+                if index % 10 == 0 or index == total:
+                    self.after(
+                        0,
+                        lambda i=index, t=total: self._set_sql_import_status(
+                            f"Liste bereit. Geocoding läuft {i}/{t}",
+                            running=True,
+                        ),
+                    )
+
+            cache_error = None
+            try:
+                self.geocoding_service.save_cache()
+            except OSError as exc:
+                logger.exception("Geocode cache could not be saved after background geocoding.")
+                cache_error = str(exc)
+
+            self.after(
+                0,
+                lambda: self._finish_pending_geocode(
+                    import_job_id,
+                    geocode_job_id,
+                    resolved_items,
+                    unresolved_items,
+                    failed_samples,
+                    geocode_errors,
+                    cache_error,
+                    phase1_stats,
+                    silent,
+                ),
+            )
+        except Exception as exc:
+            logger.exception("Pending geocoding worker crashed.")
+            self.after(
+                0,
+                lambda: self._set_sql_import_status(f"Fehler: {exc}", running=False),
+            )
+
+    def _finish_pending_geocode(
+        self,
+        import_job_id: int,
+        geocode_job_id: int,
+        resolved_items: list[dict],
+        unresolved_items: list[dict],
+        failed_samples: list[dict],
+        geocode_errors: int,
+        cache_error: str | None,
+        phase1_stats: dict,
+        silent: bool,
+    ):
+        if import_job_id != self._import_job or geocode_job_id != self._pending_geocode_job:
+            self._set_sql_import_status("Bereit", running=False)
+            return
+        try:
+            marker_by_identity, _markers_without_identity = self._collect_non_system_markers_by_identity()
+
+            for item in resolved_items:
+                identity_key = self._item_identity_key(item)
+                marker = marker_by_identity.get(identity_key)
+                if marker is None:
+                    self._create_marker(item["lat"], item["lng"], item, item.get("Status") or "nicht festgelegt")
+                    continue
+                self._apply_payload_to_existing_marker(marker, item)
+
+            self.pending_sql_orders = list(unresolved_items or [])
+            self._save_pending_sql_orders()
+
+            self._refresh_after_sql_marker_changes(bool(resolved_items), show_map=False)
+            self._warn_sql_cache_save_error(cache_error)
+
+            report_path = self._write_geocode_failure_report(failed_samples or [])
+            total_rows = int(phase1_stats.get("rows_total", 0))
+            created = int(phase1_stats.get("created", 0))
+            updated = int(phase1_stats.get("updated", 0))
+            removed = int(phase1_stats.get("removed", 0))
+            duplicates = int(phase1_stats.get("duplicate_sql_rows", 0))
+            geocoded_background = len(resolved_items)
+            geocode_failed = len(unresolved_items)
+
+            finished_status = (
+                f"Fertig: gelesen {total_rows}, neu {created}, aktualisiert {updated}, "
+                f"geocodiert {geocoded_background}, offen ohne Koordinaten {geocode_failed}"
+            )
+            self._set_sql_import_status(finished_status, running=False)
+
+            if not silent:
+                preview_lines = []
+                for item in (failed_samples or [])[:5]:
+                    order_number = str(item.get("Auftragsnummer") or "").strip()
+                    street = str(item.get("Strasse") or "").strip()
+                    plz = str(item.get("PLZ") or "").strip()
+                    ort = str(item.get("Ort") or "").strip()
+                    land = str(item.get("Land") or "").strip()
+                    preview_lines.append(f"- {order_number}: {street}, {plz} {ort}, {land}".strip())
+                geocode_block = ""
+                if preview_lines:
+                    geocode_block = "\n\nBeispiele fehlgeschlagener Geocoding-Adressen:\n" + "\n".join(preview_lines)
+                report_line = f"\nReport: {report_path}" if report_path else ""
+                messagebox.showinfo(
+                    "Import",
+                    "SQL-Import (2 Phasen) abgeschlossen.\n"
+                    f"Datenbank: {self.sql_database or 'Unbekannt'}\n"
+                    f"SQL-Aufträge gelesen: {total_rows}\n"
+                    f"Neu (in Liste): {created}\n"
+                    f"Aktualisiert: {updated}\n"
+                    f"Ohne Karte (Lieferart): {int(phase1_stats.get('skipped_non_map_delivery', 0))}\n"
+                    f"Entfernt (nicht mehr offen): {removed}\n"
+                    f"Doppelte SQL-Zeilen: {duplicates}\n"
+                    f"Hintergrund-Geocoding erfolgreich: {geocoded_background}\n"
+                    f"Ohne Koordinaten verbleibend: {geocode_failed}\n"
+                    f"Geocoding-Fehler (Exceptions): {int(geocode_errors)}"
+                    f"{report_line}"
+                    f"{geocode_block}",
+                )
+        except Exception as exc:
+            logger.exception("Finalizing pending geocoding failed.")
+            self._fail_sql_import(exc, message="SQL-Import konnte nicht abgeschlossen werden")
 
     # ---------- Pins persistence ----------
     def save_pins(self):
@@ -6398,8 +8257,9 @@ class ModernApp(ctk.CTk):
             try:
                 lat, lng = m.position[0], m.position[1]
                 status = getattr(m, "status", "nicht festgelegt")
-                data = getattr(m, "data", {}) or {}
+                data = _normalize_order_and_delivery_addresses(getattr(m, "data", {}) or {})
                 data["Status"] = status
+                m.data = data
 
                 pins.append({
                     "lat": lat,
@@ -6442,6 +8302,7 @@ class ModernApp(ctk.CTk):
                 lng = p.get("lng")
                 status = p.get("status", "nicht festgelegt")
                 data = p.get("data", {}) or {}
+                data = _normalize_order_and_delivery_addresses(data)
                 data["Status"] = status
 
                 if lat is None or lng is None:
@@ -6455,45 +8316,6 @@ class ModernApp(ctk.CTk):
         except OSError as e:
             logger.exception("Pins could not be loaded.")
             messagebox.showerror("Laden", f"Pins konnten nicht geladen werden:\n{e}")
-
-    # ---------- Folder watcher ----------
-    def start_folder_watch(self):
-        self._sync_seen_files()
-        self.after(5000, self._poll_folder)
-
-    def _sync_seen_files(self):
-        self._seen_xml_files = set()
-        if self.xml_folder and os.path.isdir(self.xml_folder):
-            for f in os.listdir(self.xml_folder):
-                if f.lower().endswith(".xml"):
-                    self._seen_xml_files.add(os.path.join(self.xml_folder, f))
-            self._update_xml_import_signatures([], current_files=list(self._seen_xml_files))
-
-    def _poll_folder(self):
-        try:
-            if self.xml_folder and os.path.isdir(self.xml_folder):
-                current = {
-                    os.path.join(self.xml_folder, f)
-                    for f in os.listdir(self.xml_folder)
-                    if f.lower().endswith(".xml")
-                }
-                changed_files = sorted(
-                    file_path for file_path in current
-                    if file_path not in self._seen_xml_files or self._xml_file_has_changed(file_path)
-                )
-
-                imported_any = False
-                for fp in changed_files:
-                    if self.import_single_xml(fp):
-                        imported_any = True
-
-                if imported_any:
-                    self.save_pins()
-
-                self._seen_xml_files = current
-                self._update_xml_import_signatures([], current_files=list(current))
-        finally:
-            self.after(5000, self._poll_folder)
 
     # ---------- Close ----------
     def on_close(self):
@@ -7370,7 +9192,7 @@ class ModernApp(ctk.CTk):
 
         tour_date = _normalize_date_string(tour_date)
         if not tour_date:
-            raise ValueError("Bitte ein Datum im Format DD-MM-YYYY eintragen.")
+            raise ValueError("Bitte ein Datum im Format DD.MM.YYYY eintragen.")
 
         parsed_start_time = parse_time(start_time)
         if parsed_start_time is None:
@@ -7495,7 +9317,7 @@ class ModernApp(ctk.CTk):
             row=0, column=0, padx=16, pady=(16, 10), sticky="w"
         )
 
-        date_entry = ctk.CTkEntry(shell, height=36, corner_radius=12, placeholder_text="Datum (DD-MM-YYYY)")
+        date_entry = ctk.CTkEntry(shell, height=36, corner_radius=12, placeholder_text="Datum (DD.MM.YYYY)")
         date_entry.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="ew")
         date_entry.insert(0, _normalize_date_string(tour.get("date")))
 
@@ -7696,7 +9518,7 @@ class ModernApp(ctk.CTk):
             row=0, column=0, padx=16, pady=(16, 10), sticky="w"
         )
 
-        date_entry = ctk.CTkEntry(shell, placeholder_text="Datum (DD-MM-YYYY)", height=36, corner_radius=12)
+        date_entry = ctk.CTkEntry(shell, placeholder_text="Datum (DD.MM.YYYY)", height=36, corner_radius=12)
         date_entry.grid(row=1, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         name_entry = ctk.CTkEntry(shell, placeholder_text="Name (optional)", height=36, corner_radius=12)
@@ -7970,7 +9792,17 @@ class ModernApp(ctk.CTk):
     def _refresh_all_markers(self):
         existing = list(self.marker_list)
         route_keys = [self._marker_key(m) for m in getattr(self, "route_markers", [])]
+        route_key_set = set(route_keys)
         selected_key = self._marker_key(self.current_selected_marker) if self.current_selected_marker else None
+        tour_usage = self._build_tour_usage_cache()
+        selected_tour = tour_usage.get(selected_key) if selected_key else None
+        selected_statuses = set(getattr(self, "map_filter_selected_statuses", set()))
+        selected_delivery_types = {
+            _normalize_delivery_type(value)
+            for value in getattr(self, "map_filter_selected_delivery_types", set())
+        }
+        only_current_tour = bool(getattr(self, "map_filter_only_current_tour", False))
+        selected_hidden = False
 
         self.marker_list.clear()
         new_by_key = {}
@@ -7980,19 +9812,51 @@ class ModernApp(ctk.CTk):
                 lat, lng = m.position
                 data = getattr(m, "data", {}) or {}
                 status = getattr(m, "status", "nicht festgelegt")
+                delivery_type = _normalize_delivery_type(data.get("Lieferart"))
+                data["Lieferart"] = delivery_type
 
                 is_system = bool(getattr(m, "is_system", False))
                 anchor_id = getattr(m, "route_anchor_id", None)
 
                 key_old = self._marker_key(m)
+                in_tour = key_old in tour_usage
+                if (not is_system) and _is_non_map_delivery_type(delivery_type):
+                    try:
+                        m.delete()
+                    except Exception:
+                        pass
+                    if selected_key is not None and key_old == selected_key:
+                        selected_hidden = True
+                    continue
+                marker_filter_statuses = {status}
+                if in_tour:
+                    marker_filter_statuses.add("Bereits eingeplant")
+                if only_current_tour:
+                    show_marker = bool(is_system or key_old in route_key_set)
+                else:
+                    matches_status = bool(marker_filter_statuses.intersection(selected_statuses))
+                    matches_delivery_type = delivery_type in selected_delivery_types
+                    show_marker = bool(
+                        is_system
+                        or key_old in route_key_set
+                        or (matches_status and matches_delivery_type)
+                    )
+                if not show_marker:
+                    try:
+                        m.delete()
+                    except Exception:
+                        pass
+                    self.marker_list.append(m)
+                    if selected_key is not None and key_old == selected_key:
+                        selected_hidden = True
+                    continue
+
                 m.delete()
 
                 if is_system and anchor_id in ("depot_start", "depot_end"):
-                    depot_color = "#10B981" if anchor_id == "depot_start" else "#EF4444"
-                    icon = self._make_circle_icon(depot_color, self.marker_icon_size)
+                    icon = self._get_depot_marker_icon(anchor_id)
                 else:
-                    in_tour = self._pin_used_in_any_tour_by_key(key_old) is not None
-                    icon = self._get_marker_icon(status, in_tour)
+                    icon = self._get_marker_icon(status, in_tour, delivery_type=delivery_type)
 
                 new_m = self.map_widget.set_marker(lat, lng, text="", icon=icon, command=self.on_marker_click)
 
@@ -8001,6 +9865,7 @@ class ModernApp(ctk.CTk):
                 new_m.full_info = self._build_popup_text(data)
                 new_m.email = data.get("Email", "")
                 new_m.auftragsnummer = data.get("Auftragsnummer", "")
+                new_m.import_id = str(data.get("ImportID") or "").strip()
 
                 if is_system:
                     new_m.is_system = True
@@ -8020,6 +9885,10 @@ class ModernApp(ctk.CTk):
 
         if selected_key and selected_key in new_by_key:
             self.current_selected_marker = new_by_key[selected_key]
+            self._selected_pin_tour = selected_tour
+        else:
+            self.current_selected_marker = None
+            self._selected_pin_tour = None
 
         self._rebuild_route_from_markers()
         self._trigger_route_metrics_recalc(force_routing=False)
@@ -8029,6 +9898,8 @@ class ModernApp(ctk.CTk):
                 self.on_marker_click(self.current_selected_marker)
             except Exception:
                 pass
+        elif selected_hidden:
+            self.hide_info_card()
 
     # ---------- Zoom watcher ----------
     def start_zoom_watch(self):
@@ -8051,23 +9922,43 @@ class ModernApp(ctk.CTk):
         return None
 
     def _check_zoom_loop(self):
+        next_delay_ms = 500
         try:
+            if getattr(self, "current_page", "") != "map":
+                next_delay_ms = 700
+                return
             if not hasattr(self, "map_widget") or self.map_widget is None:
-                self.after(300, self._check_zoom_loop)
                 return
 
             zoom = self._get_current_zoom()
             if zoom is None:
-                self.after(300, self._check_zoom_loop)
                 return
 
             if zoom != self._last_zoom:
                 self._last_zoom = zoom
-                self._apply_marker_size_for_zoom(zoom)
+                self._schedule_marker_size_update(zoom)
         finally:
-            self.after(300, self._check_zoom_loop)
+            self.after(next_delay_ms, self._check_zoom_loop)
+
+    def _schedule_marker_size_update(self, zoom: int, delay_ms: int = 260):
+        if self._pending_marker_size_job is not None:
+            try:
+                self.after_cancel(self._pending_marker_size_job)
+            except Exception:
+                pass
+        self._pending_marker_size_job = self.after(
+            delay_ms,
+            lambda z=int(zoom): self._apply_marker_size_for_zoom(z),
+        )
 
     def _apply_marker_size_for_zoom(self, zoom: int):
+        self._pending_marker_size_job = None
+        if getattr(self, "current_page", "") != "map":
+            return
+        if self._is_window_resizing:
+            self._schedule_marker_size_update(zoom, delay_ms=240)
+            return
+
         if zoom <= 9:
             size = 18
         elif zoom <= 12:
