@@ -1,0 +1,45 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tourenplaner.CSharp.App", "src\Tourenplaner.CSharp.App\Tourenplaner.CSharp.App.csproj", "{8B8B63E8-6639-4D1D-A9C0-51B6285B7C3B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tourenplaner.CSharp.Application", "src\Tourenplaner.CSharp.Application\Tourenplaner.CSharp.Application.csproj", "{A3A5CE77-0FB6-41A1-81B5-0C95B1AA5D0E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tourenplaner.CSharp.Domain", "src\Tourenplaner.CSharp.Domain\Tourenplaner.CSharp.Domain.csproj", "{6BF75B5D-9E7B-4788-A7D9-A8867A225931}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tourenplaner.CSharp.Infrastructure", "src\Tourenplaner.CSharp.Infrastructure\Tourenplaner.CSharp.Infrastructure.csproj", "{38A4C642-9004-4B44-9E84-85B1A6E7CF45}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Tourenplaner.CSharp.Tests", "tests\Tourenplaner.CSharp.Tests\Tourenplaner.CSharp.Tests.csproj", "{E9A83824-98C7-4B08-BEF4-CFE38F1AA03E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8B8B63E8-6639-4D1D-A9C0-51B6285B7C3B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8B8B63E8-6639-4D1D-A9C0-51B6285B7C3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8B8B63E8-6639-4D1D-A9C0-51B6285B7C3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8B8B63E8-6639-4D1D-A9C0-51B6285B7C3B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A3A5CE77-0FB6-41A1-81B5-0C95B1AA5D0E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A3A5CE77-0FB6-41A1-81B5-0C95B1AA5D0E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A3A5CE77-0FB6-41A1-81B5-0C95B1AA5D0E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A3A5CE77-0FB6-41A1-81B5-0C95B1AA5D0E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6BF75B5D-9E7B-4788-A7D9-A8867A225931}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6BF75B5D-9E7B-4788-A7D9-A8867A225931}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6BF75B5D-9E7B-4788-A7D9-A8867A225931}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6BF75B5D-9E7B-4788-A7D9-A8867A225931}.Release|Any CPU.Build.0 = Release|Any CPU
+		{38A4C642-9004-4B44-9E84-85B1A6E7CF45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{38A4C642-9004-4B44-9E84-85B1A6E7CF45}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{38A4C642-9004-4B44-9E84-85B1A6E7CF45}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{38A4C642-9004-4B44-9E84-85B1A6E7CF45}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E9A83824-98C7-4B08-BEF4-CFE38F1AA03E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E9A83824-98C7-4B08-BEF4-CFE38F1AA03E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E9A83824-98C7-4B08-BEF4-CFE38F1AA03E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E9A83824-98C7-4B08-BEF4-CFE38F1AA03E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

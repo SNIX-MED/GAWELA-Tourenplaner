@@ -1,0 +1,64 @@
+<Window x:Class="Tourenplaner.CSharp.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="GAWELA Tourenplaner C#"
+        Width="1440"
+        Height="920"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource AppBackgroundBrush}">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" Margin="0" Background="{StaticResource PanelBrush}">
+            <DockPanel LastChildFill="True">
+                <StackPanel Margin="20,24,20,16" DockPanel.Dock="Top">
+                    <TextBlock Text="GAWELA Tourenplaner" Foreground="{StaticResource TextBrush}" FontSize="24" FontWeight="Bold" />
+                    <TextBlock Text="C#-Migration / Shell-Grundgerüst" Foreground="{StaticResource SubTextBrush}" Margin="0,6,0,0" />
+                </StackPanel>
+
+                <StackPanel x:Name="SidebarQuickAccessHost" Margin="16,0,16,16" DockPanel.Dock="Bottom" />
+
+                <ListBox x:Name="NavigationList"
+                         Margin="16"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         SelectionChanged="NavigationList_OnSelectionChanged"
+                         DisplayMemberPath="Title" />
+            </DockPanel>
+        </Border>
+
+        <Grid Grid.Column="1" Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Border Grid.Row="0" Padding="24" Background="{StaticResource PanelBrush}" CornerRadius="16">
+                <StackPanel>
+                    <TextBlock x:Name="PageTitleText" Text="Start" Foreground="{StaticResource TextBrush}" FontSize="28" FontWeight="Bold" />
+                    <TextBlock x:Name="PageDescriptionText" Text="Die Seitenreihenfolge und Navigationslogik des Python-Projekts bleibt erhalten." Foreground="{StaticResource SubTextBrush}" Margin="0,8,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <Border Grid.Row="1" Margin="0,20,0,0" Padding="24" Background="{StaticResource PanelSecondaryBrush}" CornerRadius="16">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="ContentHost">
+                        <TextBlock TextWrapping="Wrap" Foreground="{StaticResource TextBrush}" FontSize="18" FontWeight="SemiBold" Text="Initiales WPF-Shell-Gerüst" />
+                        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" Foreground="{StaticResource SubTextBrush}">
+                            Diese erste C#-Version legt die spätere Seitenstruktur bereits mit den bekannten Bereichen an: Start, Kalender, Karte, GPS, Auftragsliste, Nicht-Karten-Aufträge, Liefertouren, Mitarbeiter, Fahrzeuge, Einstellungen und Updates.
+                        </TextBlock>
+                        <TextBlock Margin="0,16,0,0" TextWrapping="Wrap" Foreground="{StaticResource SubTextBrush}">
+                            Im nächsten Schritt werden pro Bereich echte ViewModels, Repositories und Geschäftslogik angebunden.
+                        </TextBlock>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

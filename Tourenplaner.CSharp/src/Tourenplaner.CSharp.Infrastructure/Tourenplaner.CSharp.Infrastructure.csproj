@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Tourenplaner.CSharp.Application\Tourenplaner.CSharp.Application.csproj" />
+    <ProjectReference Include="..\Tourenplaner.CSharp.Domain\Tourenplaner.CSharp.Domain.csproj" />
+  </ItemGroup>
+</Project>
