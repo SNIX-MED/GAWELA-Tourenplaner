@@ -1,0 +1,11 @@
+{
+  "$schema": "../module.schema.json",
+  "Group": "Catalog",
+  "SystemName": "Smartstore.SpecificationAttributeExchange",
+  "FriendlyName": "Specification Attribute Exchange",
+  "Description": "Excel export/import for specification attributes and their options.",
+  "Version": "1.0.0",
+  "MinAppVersion": "6.4.0",
+  "Author": "SNIX-MED",
+  "Order": 20
+}
