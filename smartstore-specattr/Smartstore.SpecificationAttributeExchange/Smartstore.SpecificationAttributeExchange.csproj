@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+  <PropertyGroup>
+    <Product>Smartstore Specification Attribute Exchange</Product>
+    <AssemblyName>Smartstore.SpecificationAttributeExchange</AssemblyName>
+    <RootNamespace>Smartstore.SpecificationAttributeExchange</RootNamespace>
+    <OutputPath>..\..\Smartstore.Web\Modules\Smartstore.SpecificationAttributeExchange</OutputPath>
+    <OutDir>$(OutputPath)</OutDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\Smartstore.Web\Smartstore.Web.csproj">
+      <Private>False</Private>
+      <CopyLocal>False</CopyLocal>
+      <CopyLocalSatelliteAssemblies>False</CopyLocalSatelliteAssemblies>
+    </ProjectReference>
+  </ItemGroup>
+</Project>
