@@ -38,7 +38,7 @@ jobs:
           test -n "$WEB_DLL"
           WEB_OUT="$(dirname "$WEB_DLL")"
           echo "Smartstore Web output: $WEB_OUT"
-          ls -lh "$WEB_OUT" | head -n 30
+          find "$WEB_OUT" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | sed -n '1,30p'
           tar -C "$WEB_OUT" -czf "$GITHUB_WORKSPACE/smartstore-refs.tar.gz" .
           ls -lh "$GITHUB_WORKSPACE/smartstore-refs.tar.gz"
 
