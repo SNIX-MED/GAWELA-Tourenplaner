@@ -1,4 +1,4 @@
-name: Cantilever Portable Decompiler Bootstrap
+name: Cantilever ILSpy Store Bootstrap
 
 on:
   push:
@@ -22,34 +22,21 @@ jobs:
         with:
           dotnet-version: 10.0.302
 
-      - name: Install ILSpy command line
+      - name: Install and pack ILSpy tool store
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/bootstrap-tools"
           dotnet tool install ilspycmd --tool-path "$GITHUB_WORKSPACE/bootstrap-tools"
           "$GITHUB_WORKSPACE/bootstrap-tools/ilspycmd" --version
-          dotnet --info
+          test -d "$GITHUB_WORKSPACE/bootstrap-tools/.store"
+          tar -C "$GITHUB_WORKSPACE/bootstrap-tools" -czf "$GITHUB_WORKSPACE/ilspy-store.tar.gz" .store
+          ls -lh "$GITHUB_WORKSPACE/ilspy-store.tar.gz"
 
-      - name: Pack portable decompiler runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          PKG="$GITHUB_WORKSPACE/bootstrap-package"
-          rm -rf "$PKG"
-          mkdir -p "$PKG/dotnet" "$PKG/tools"
-          cp -a "$DOTNET_ROOT/dotnet" "$PKG/dotnet/"
-          cp -a "$DOTNET_ROOT/host" "$PKG/dotnet/"
-          cp -a "$DOTNET_ROOT/shared" "$PKG/dotnet/"
-          cp -a "$GITHUB_WORKSPACE/bootstrap-tools"/. "$PKG/tools/"
-          printf 'dotnet=%s\n' "$(dotnet --version)" > "$PKG/versions.txt"
-          "$GITHUB_WORKSPACE/bootstrap-tools/ilspycmd" --version >> "$PKG/versions.txt"
-          du -sh "$PKG"/*
-
-      - name: Upload portable decompiler
+      - name: Upload ILSpy store
         uses: actions/upload-artifact@v4
         with:
-          name: cantilever-portable-decompiler
-          path: bootstrap-package
+          name: cantilever-ilspy-store
+          path: ilspy-store.tar.gz
           if-no-files-found: error
-          compression-level: 6
+          compression-level: 0
