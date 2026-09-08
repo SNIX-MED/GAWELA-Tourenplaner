@@ -1,4 +1,4 @@
-name: Cantilever ILSpy Store Bootstrap
+name: Cantilever Offline Build Kit
 
 on:
   push:
@@ -22,21 +22,50 @@ jobs:
         with:
           dotnet-version: 10.0.302
 
-      - name: Install and pack ILSpy tool store
+      - name: Checkout Smartstore 6.4.0
+        uses: actions/checkout@v4
+        with:
+          repository: smartstore/Smartstore
+          ref: 6.4.0
+          path: smartstore
+
+      - name: Build Smartstore references
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/bootstrap-tools"
-          dotnet tool install ilspycmd --tool-path "$GITHUB_WORKSPACE/bootstrap-tools"
-          "$GITHUB_WORKSPACE/bootstrap-tools/ilspycmd" --version
-          test -d "$GITHUB_WORKSPACE/bootstrap-tools/.store"
-          tar -C "$GITHUB_WORKSPACE/bootstrap-tools" -czf "$GITHUB_WORKSPACE/ilspy-store.tar.gz" .store
-          ls -lh "$GITHUB_WORKSPACE/ilspy-store.tar.gz"
+          dotnet build smartstore/src/Smartstore.Web/Smartstore.Web.csproj -c DebugNoRazorCompile -p:RazorCompileOnBuild=false -p:RazorCompileOnPublish=false
+          WEB_DLL="$(find smartstore/src/Smartstore.Web -path '*/bin/*' -name Smartstore.Web.dll -type f | head -n 1)"
+          test -n "$WEB_DLL"
+          WEB_OUT="$(dirname "$WEB_DLL")"
+          echo "Smartstore Web output: $WEB_OUT"
+          ls -lh "$WEB_OUT" | head -n 30
+          tar -C "$WEB_OUT" -czf "$GITHUB_WORKSPACE/smartstore-refs.tar.gz" .
+          ls -lh "$GITHUB_WORKSPACE/smartstore-refs.tar.gz"
 
-      - name: Upload ILSpy store
+      - name: Pack SDK build components
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$DOTNET_ROOT/sdk/10.0.302"
+          test -d "$DOTNET_ROOT/packs"
+          ITEMS=(sdk/10.0.302 packs)
+          [ ! -d "$DOTNET_ROOT/sdk-manifests" ] || ITEMS+=(sdk-manifests)
+          [ ! -d "$DOTNET_ROOT/metadata" ] || ITEMS+=(metadata)
+          tar -C "$DOTNET_ROOT" -czf "$GITHUB_WORKSPACE/dotnet-sdk-build-parts.tar.gz" "${ITEMS[@]}"
+          ls -lh "$GITHUB_WORKSPACE/dotnet-sdk-build-parts.tar.gz"
+
+      - name: Upload SDK build components
         uses: actions/upload-artifact@v4
         with:
-          name: cantilever-ilspy-store
-          path: ilspy-store.tar.gz
+          name: cantilever-dotnet-sdk-build-parts
+          path: dotnet-sdk-build-parts.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Smartstore references
+        uses: actions/upload-artifact@v4
+        with:
+          name: cantilever-smartstore-refs
+          path: smartstore-refs.tar.gz
           if-no-files-found: error
           compression-level: 0
